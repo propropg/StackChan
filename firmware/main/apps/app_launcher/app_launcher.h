@@ -25,7 +25,9 @@ private:
     std::unique_ptr<setup_workers::StartupWorker> _startup_worker;
     uint32_t _screensaver_timecount = 0;
     bool _startup_checked           = false;
+    bool _auto_open_avatar          = false;
 
     void create_launcher_view();
+    void open_app_by_name(const std::string& name);
     void screensaver_update();
 };

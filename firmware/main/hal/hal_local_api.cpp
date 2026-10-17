@@ -21,6 +21,7 @@
 #include <audio/audio_codec.h>
 #include <esp_http_server.h>
 #include <esp_netif.h>
+#include <mdns.h>
 #include <esp_heap_caps.h>
 #include <ArduinoJson.hpp>
 #include <algorithm>
@@ -467,6 +468,25 @@ std::string Hal::getLocalIp()
     return buf;
 }
 
+static void start_mdns()
+{
+    static bool started = false;
+    if (started) {
+        return;
+    }
+
+    if (mdns_init() != ESP_OK) {
+        mclog::tagError("LocalApi", "failed to init mdns");
+        return;
+    }
+    mdns_hostname_set("stackchan");
+    mdns_instance_name_set("Stack-chan");
+    mdns_service_add(nullptr, "_http", "_tcp", 80, nullptr, 0);
+    started = true;
+
+    mclog::tagInfo("LocalApi", "mdns started: http://stackchan.local/");
+}
+
 void Hal::startLocalApiService(std::function<void(std::string_view)> onStartLog)
 {
     mclog::tagInfo(_tag, "start local api service");
@@ -501,6 +521,8 @@ void Hal::startLocalApiService(std::function<void(std::string_view)> onStartLog)
     for (const auto& uri : uris) {
         httpd_register_uri_handler(_server, &uri);
     }
+
+    start_mdns();
 
     mclog::tagInfo(_tag, "local api listening on http://{}/", getLocalIp());
 }

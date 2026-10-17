@@ -91,6 +91,16 @@ void AppAvatar::onOpen()
     GetStackChan().attachAvatar(std::move(avatar));
     GetStackChan().addModifier(std::make_unique<TimedSpeechModifier>(GetHAL().getLocalIp(), 10000));
 
+    // Keep StackChan alive while idle, same set as the AI agent screen: blinking, breathing, reacting to
+    // head pets and being moved, looking around every 4-8s (normal level) and small facial expressions.
+    // Idle motion skips its turn while the head is already moving (notifications, API motion, dances).
+    GetStackChan().addModifier(std::make_unique<BreathModifier>());
+    GetStackChan().addModifier(std::make_unique<BlinkModifier>());
+    GetStackChan().addModifier(std::make_unique<HeadPetModifier>());
+    GetStackChan().addModifier(std::make_unique<ImuEventModifier>());
+    GetStackChan().addModifier(std::make_unique<IdleMotionModifier>(4000, 8000));
+    GetStackChan().addModifier(std::make_unique<IdleExpressionModifier>());
+
     /* ------------------------------- BLE events ------------------------------- */
     GetHAL().onBleAvatarData.connect([&](const char* data) {
         std::lock_guard<std::mutex> lock(_mutex);

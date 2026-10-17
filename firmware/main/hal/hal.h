@@ -259,6 +259,8 @@ public:
     std::string getLocalIp();
     // Greeting voice + LED blink + nod so the user can tell StackChan is up and the API is ready
     void playBootGreeting();
+    // (Re)create the idle animation modifiers from the saved settings. Call with the LVGL lock held.
+    void applyIdleModifiers();
 
     /* ----------------------------------- IMU ---------------------------------- */
     uitk::Signal<ImuMotionEvent> onImuMotionEvent;

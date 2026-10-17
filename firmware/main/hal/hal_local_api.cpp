@@ -12,6 +12,12 @@
  *   POST /api/avatar                               body: native avatar json (leftEye/rightEye/mouth)
  *   POST /api/led                                  body: {"leftRgbColor":"#RRGGBB","rightRgbColor":"#RRGGBB"}
  *
+ *   GET  /api/settings                             -> volume, brightness, timezone, idle animation settings, device info
+ *   POST /api/settings                             body: any subset of the settings above (saved to flash)
+ *   GET  /api/state                                -> current head angles
+ *   POST /api/servo                                body: {"power":bool} | {"calibrateZero":true} | {"resetCalibration":true}
+ *   POST /api/reboot
+ *
  * Handlers only take effect while the AVATAR app is open (its signal handlers are connected there).
  */
 #include "hal.h"
@@ -22,6 +28,10 @@
 #include <esp_http_server.h>
 #include <esp_netif.h>
 #include <mdns.h>
+#include <settings.h>
+#include <esp_app_desc.h>
+#include <esp_system.h>
+#include <esp_timer.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -489,6 +499,224 @@ static esp_err_t handle_led(httpd_req_t* req)
     });
 }
 
+/* ----------------------------- Idle animations ---------------------------- */
+
+static const char* _settings_ns = "localapi";
+
+struct IdleSettings {
+    int motionLevel = 2;  // 0 off, 1 low (8-12s), 2 normal (4-8s), 3 high (2-4s); shared with the AI agent setting
+    bool blink      = true;
+    bool breath     = true;
+    bool expression = true;
+    bool headPet    = true;
+    bool imu        = true;
+};
+
+static IdleSettings load_idle_settings()
+{
+    IdleSettings out;
+    out.motionLevel = GetHAL().getXiaozhiConfig().idleRandomMovementLevel;
+    Settings settings(_settings_ns, false);
+    out.blink      = settings.GetBool("idle_blink", true);
+    out.breath     = settings.GetBool("idle_breath", true);
+    out.expression = settings.GetBool("idle_expr", true);
+    out.headPet    = settings.GetBool("idle_headpet", true);
+    out.imu        = settings.GetBool("idle_imu", true);
+    return out;
+}
+
+static void save_idle_settings(const IdleSettings& idle)
+{
+    auto config = GetHAL().getXiaozhiConfig();
+    if (config.idleRandomMovementLevel != idle.motionLevel) {
+        config.idleRandomMovementLevel = idle.motionLevel;
+        GetHAL().setXiaozhiConfig(config);
+    }
+    Settings settings(_settings_ns, true);
+    settings.SetBool("idle_blink", idle.blink);
+    settings.SetBool("idle_breath", idle.breath);
+    settings.SetBool("idle_expr", idle.expression);
+    settings.SetBool("idle_headpet", idle.headPet);
+    settings.SetBool("idle_imu", idle.imu);
+}
+
+static std::vector<int> _idle_modifier_ids;
+
+void Hal::applyIdleModifiers()
+{
+    auto& stackchan = GetStackChan();
+    for (int id : _idle_modifier_ids) {
+        stackchan.removeModifier(id);
+    }
+    _idle_modifier_ids.clear();
+
+    const auto idle = load_idle_settings();
+    auto add        = [&](std::unique_ptr<Modifier> modifier) {
+        _idle_modifier_ids.push_back(stackchan.addModifier(std::move(modifier)));
+    };
+    if (idle.breath) add(std::make_unique<BreathModifier>());
+    if (idle.blink) add(std::make_unique<BlinkModifier>());
+    if (idle.headPet) add(std::make_unique<HeadPetModifier>());
+    if (idle.imu) add(std::make_unique<ImuEventModifier>());
+    if (idle.expression) add(std::make_unique<IdleExpressionModifier>());
+    switch (idle.motionLevel) {
+        case 1: add(std::make_unique<IdleMotionModifier>(8000, 12000)); break;
+        case 2: add(std::make_unique<IdleMotionModifier>(4000, 8000)); break;
+        case 3: add(std::make_unique<IdleMotionModifier>(2000, 4000)); break;
+        default: break;
+    }
+    mclog::tagInfo(_tag, "idle modifiers applied: motion level {}, {} modifiers", idle.motionLevel,
+                   _idle_modifier_ids.size());
+}
+
+/* ------------------------- Settings / control API ------------------------- */
+
+static esp_err_t handle_get_settings(httpd_req_t* req)
+{
+    const auto idle = load_idle_settings();
+    ArduinoJson::JsonDocument doc;
+    doc["ok"]              = true;
+    doc["volume"]          = GetHAL().getSpeakerVolume();
+    doc["brightness"]      = GetHAL().getBackLightBrightness();
+    doc["timezone"]        = GetHAL().getTimezone();
+    doc["idleMotionLevel"] = idle.motionLevel;
+    doc["blink"]           = idle.blink;
+    doc["breath"]          = idle.breath;
+    doc["idleExpression"]  = idle.expression;
+    doc["headPet"]         = idle.headPet;
+    doc["imu"]             = idle.imu;
+
+    auto info         = doc["device"].to<ArduinoJson::JsonObject>();
+    info["ip"]        = GetHAL().getLocalIp();
+    info["firmware"]  = esp_app_get_description()->version;
+    info["battery"]   = GetHAL().getBatteryLevel();
+    info["charging"]  = GetHAL().isBatteryCharging();
+    info["freeHeap"]  = esp_get_free_heap_size();
+    info["uptimeSec"] = static_cast<uint32_t>(esp_timer_get_time() / 1000000);
+
+    std::string out;
+    ArduinoJson::serializeJson(doc, out);
+    return send_json(req, "200 OK", out);
+}
+
+// Parse a small JSON request body; returns false (and sends the error response) on failure
+static bool read_json_body(httpd_req_t* req, ArduinoJson::JsonDocument& doc)
+{
+    size_t len        = 0;
+    const char* error = nullptr;
+    uint8_t* body     = read_body(req, _max_json_size, len, error);
+    if (!body) {
+        send_error(req, "400 Bad Request", error);
+        return false;
+    }
+    auto err = ArduinoJson::deserializeJson(doc, reinterpret_cast<const char*>(body), len);
+    heap_caps_free(body);
+    if (err) {
+        send_error(req, "400 Bad Request", err.c_str());
+        return false;
+    }
+    return true;
+}
+
+static esp_err_t handle_post_settings(httpd_req_t* req)
+{
+    ArduinoJson::JsonDocument doc;
+    if (!read_json_body(req, doc)) {
+        return ESP_OK;
+    }
+
+    if (doc["volume"].is<int>()) {
+        GetHAL().setSpeakerVolume(std::clamp(doc["volume"].as<int>(), 0, 100), true);
+    }
+    if (doc["brightness"].is<int>()) {
+        GetHAL().setBackLightBrightness(std::clamp(doc["brightness"].as<int>(), 1, 100), true);
+    }
+    if (doc["timezone"].is<const char*>()) {
+        GetHAL().setTimezone(doc["timezone"].as<std::string>());
+    }
+
+    auto idle         = load_idle_settings();
+    bool idle_changed = false;
+    if (doc["idleMotionLevel"].is<int>()) {
+        idle.motionLevel = std::clamp(doc["idleMotionLevel"].as<int>(), 0, 3);
+        idle_changed     = true;
+    }
+    auto read_bool = [&](const char* key, bool& target) {
+        if (doc[key].is<bool>()) {
+            target       = doc[key].as<bool>();
+            idle_changed = true;
+        }
+    };
+    read_bool("blink", idle.blink);
+    read_bool("breath", idle.breath);
+    read_bool("idleExpression", idle.expression);
+    read_bool("headPet", idle.headPet);
+    read_bool("imu", idle.imu);
+
+    if (idle_changed) {
+        save_idle_settings(idle);
+        LvglLockGuard lock;
+        if (GetStackChan().hasAvatar()) {
+            GetHAL().applyIdleModifiers();
+        }
+    }
+    return handle_get_settings(req);
+}
+
+static esp_err_t handle_state(httpd_req_t* req)
+{
+    ArduinoJson::JsonDocument doc;
+    {
+        LvglLockGuard lock;
+        auto& motion  = GetStackChan().motion();
+        doc["ok"]     = true;
+        doc["yaw"]    = motion.yawServo().getCurrentAngle() / 10;
+        doc["pitch"]  = motion.pitchServo().getCurrentAngle() / 10;
+        doc["moving"] = motion.isMoving();
+        doc["avatar"] = GetStackChan().hasAvatar();
+    }
+    std::string out;
+    ArduinoJson::serializeJson(doc, out);
+    return send_json(req, "200 OK", out);
+}
+
+static esp_err_t handle_servo(httpd_req_t* req)
+{
+    ArduinoJson::JsonDocument doc;
+    if (!read_json_body(req, doc)) {
+        return ESP_OK;
+    }
+
+    if (doc["power"].is<bool>()) {
+        GetHAL().setServoPowerEnabled(doc["power"].as<bool>());
+    }
+    if (doc["calibrateZero"].is<bool>() && doc["calibrateZero"].as<bool>()) {
+        // Same as SETUP > Servo: the current physical position becomes the new center
+        LvglLockGuard lock;
+        GetStackChan().motion().yawServo().setCurrentAngleAsZero();
+        GetStackChan().motion().pitchServo().setCurrentAngleAsZero();
+    }
+    if (doc["resetCalibration"].is<bool>() && doc["resetCalibration"].as<bool>()) {
+        LvglLockGuard lock;
+        GetStackChan().motion().yawServo().resetZeroCalibration();
+        GetStackChan().motion().pitchServo().resetZeroCalibration();
+    }
+    return send_ok(req);
+}
+
+static void reboot_task(void*)
+{
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
+}
+
+static esp_err_t handle_reboot(httpd_req_t* req)
+{
+    send_ok(req);
+    xTaskCreate(reboot_task, "reboot", 2048, nullptr, 5, nullptr);
+    return ESP_OK;
+}
+
 /* ------------------------------ Boot greeting ----------------------------- */
 
 extern const uint8_t _boot_jingle_wav_start[] asm("_binary_boot_jingle_wav_start");
@@ -607,7 +835,7 @@ void Hal::startLocalApiService(std::function<void(std::string_view)> onStartLog)
 
     httpd_config_t config   = HTTPD_DEFAULT_CONFIG();
     config.stack_size       = 8192;
-    config.max_uri_handlers = 8;
+    config.max_uri_handlers = 16;
     config.recv_wait_timeout = 10;
     config.send_wait_timeout = 10;
 
@@ -625,6 +853,11 @@ void Hal::startLocalApiService(std::function<void(std::string_view)> onStartLog)
         {.uri = "/api/dance", .method = HTTP_POST, .handler = handle_dance, .user_ctx = nullptr},
         {.uri = "/api/avatar", .method = HTTP_POST, .handler = handle_avatar, .user_ctx = nullptr},
         {.uri = "/api/led", .method = HTTP_POST, .handler = handle_led, .user_ctx = nullptr},
+        {.uri = "/api/settings", .method = HTTP_GET, .handler = handle_get_settings, .user_ctx = nullptr},
+        {.uri = "/api/settings", .method = HTTP_POST, .handler = handle_post_settings, .user_ctx = nullptr},
+        {.uri = "/api/state", .method = HTTP_GET, .handler = handle_state, .user_ctx = nullptr},
+        {.uri = "/api/servo", .method = HTTP_POST, .handler = handle_servo, .user_ctx = nullptr},
+        {.uri = "/api/reboot", .method = HTTP_POST, .handler = handle_reboot, .user_ctx = nullptr},
     };
     for (const auto& uri : uris) {
         httpd_register_uri_handler(_server, &uri);

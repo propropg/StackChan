@@ -474,16 +474,14 @@ extern const uint8_t _boot_jingle_wav_end[] asm("_binary_boot_jingle_wav_end");
 extern const uint8_t _boot_greeting_wav_start[] asm("_binary_boot_greeting_wav_start");
 extern const uint8_t _boot_greeting_wav_end[] asm("_binary_boot_greeting_wav_end");
 
-// Jingle: one LED color per note while the head rises (angles in 0.1 degree), then
+// Jingle: quick LED color sweep while the head rises (angles in 0.1 degree), then
 // nod with green blinks during the greeting; the LEDs stay green until it ends
 static const char* _boot_dance = R"([
-  {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":0,"speed":500},"pitchServo":{"angle":20,"speed":500},"leftRgbColor":"#A80000","rightRgbColor":"#A80000","durationMs":100},
-  {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":0,"speed":500},"pitchServo":{"angle":40,"speed":500},"leftRgbColor":"#A85000","rightRgbColor":"#A85000","durationMs":100},
-  {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":0,"speed":500},"pitchServo":{"angle":60,"speed":500},"leftRgbColor":"#A8A800","rightRgbColor":"#A8A800","durationMs":100},
-  {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":0,"speed":500},"pitchServo":{"angle":90,"speed":500},"leftRgbColor":"#00A800","rightRgbColor":"#00A800","durationMs":200},
-  {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":-60,"speed":500},"pitchServo":{"angle":110,"speed":500},"leftRgbColor":"#00A8A8","rightRgbColor":"#00A8A8","durationMs":100},
-  {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":60,"speed":500},"pitchServo":{"angle":130,"speed":500},"leftRgbColor":"#0040A8","rightRgbColor":"#0040A8","durationMs":100},
-  {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":0,"speed":400},"pitchServo":{"angle":160,"speed":400},"leftRgbColor":"#787878","rightRgbColor":"#787878","durationMs":900},
+  {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":0,"speed":800},"pitchServo":{"angle":60,"speed":800},"leftRgbColor":"#A80000","rightRgbColor":"#A80000","durationMs":80},
+  {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":0,"speed":800},"pitchServo":{"angle":100,"speed":800},"leftRgbColor":"#A8A800","rightRgbColor":"#A8A800","durationMs":80},
+  {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":0,"speed":800},"pitchServo":{"angle":130,"speed":800},"leftRgbColor":"#00A800","rightRgbColor":"#00A800","durationMs":80},
+  {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":0,"speed":800},"pitchServo":{"angle":150,"speed":800},"leftRgbColor":"#0040A8","rightRgbColor":"#0040A8","durationMs":80},
+  {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":0,"speed":400},"pitchServo":{"angle":150,"speed":400},"leftRgbColor":"#787878","rightRgbColor":"#787878","durationMs":300},
   {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":0,"speed":500},"pitchServo":{"angle":0,"speed":500},"leftRgbColor":"#000000","rightRgbColor":"#000000","durationMs":250},
   {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":0,"speed":500},"pitchServo":{"angle":150,"speed":500},"leftRgbColor":"#00A800","rightRgbColor":"#00A800","durationMs":250},
   {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":0,"speed":500},"pitchServo":{"angle":0,"speed":500},"leftRgbColor":"#000000","rightRgbColor":"#000000","durationMs":250},

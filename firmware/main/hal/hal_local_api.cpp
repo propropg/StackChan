@@ -268,8 +268,24 @@ static std::vector<int16_t, PsramAllocator<int16_t>> to_output_pcm(const WavInfo
 
 // Play mono PCM at the codec output rate while flapping the mouth, with optional emotion / speech bubble.
 // Blocks until playback finishes.
+// Write silence to the codec. Used to let the amp settle after opening the output and to flush the DMA
+// buffer before closing it; otherwise the start and the last ~60ms of a clip get cut off.
+static void write_silence(AudioCodec* codec, uint32_t ms)
+{
+    const int channels = std::max(codec->output_channels(), 1);
+    size_t frames      = static_cast<size_t>(codec->output_sample_rate()) * ms / 1000;
+    std::vector<int16_t> chunk;
+    while (frames > 0) {
+        size_t n = std::min(frames, _playback_chunk_size);
+        chunk.assign(n * channels, 0);
+        codec->OutputData(chunk);
+        frames -= n;
+    }
+}
+
 static void speak_pcm(const std::vector<int16_t, PsramAllocator<int16_t>>& pcm, AudioCodec* codec,
-                      const std::string& text, const std::string& emotion_name, bool animate_mouth = true)
+                      const std::string& text, const std::string& emotion_name, bool animate_mouth = true,
+                      bool keep_output_open = false)
 {
     const uint32_t duration_ms = pcm.size() * 1000ULL / codec->output_sample_rate();
     mclog::tagInfo(_tag, "say: {} ms, emotion: {}, text: {}", duration_ms, emotion_name, text);
@@ -296,7 +312,10 @@ static void speak_pcm(const std::vector<int16_t, PsramAllocator<int16_t>>& pcm, 
 
     // Blocks until playback finishes, so the client knows when StackChan is done talking
     const int channels = std::max(codec->output_channels(), 1);
-    codec->EnableOutput(true);
+    if (!codec->output_enabled()) {
+        codec->EnableOutput(true);
+        write_silence(codec, 100);
+    }
     std::vector<int16_t> chunk;
     chunk.reserve(_playback_chunk_size * channels);
     for (size_t pos = 0; pos < pcm.size(); pos += _playback_chunk_size) {
@@ -309,7 +328,10 @@ static void speak_pcm(const std::vector<int16_t, PsramAllocator<int16_t>>& pcm, 
         }
         codec->OutputData(chunk);
     }
-    codec->EnableOutput(false);
+    if (!keep_output_open) {
+        write_silence(codec, 150);
+        codec->EnableOutput(false);
+    }
 
 }
 
@@ -490,7 +512,8 @@ static const char* _boot_dance = R"([
   {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":0,"speed":400},"pitchServo":{"angle":0,"speed":400},"leftRgbColor":"#00A800","rightRgbColor":"#00A800","durationMs":250}
 ])";
 
-static void play_embedded_wav(const uint8_t* start, const uint8_t* end, const char* emotion, bool animate_mouth)
+static void play_embedded_wav(const uint8_t* start, const uint8_t* end, const char* emotion, bool animate_mouth,
+                              bool keep_output_open)
 {
     auto codec = Board::GetInstance().GetAudioCodec();
     WavInfo wav;
@@ -501,7 +524,7 @@ static void play_embedded_wav(const uint8_t* start, const uint8_t* end, const ch
     try {
         auto pcm = to_output_pcm(wav, codec->output_sample_rate());
         // Empty text keeps the IP address bubble that the AVATAR app shows on open
-        speak_pcm(pcm, codec, "", emotion, animate_mouth);
+        speak_pcm(pcm, codec, "", emotion, animate_mouth, keep_output_open);
     } catch (const std::bad_alloc&) {
         mclog::tagError(_tag, "boot greeting: out of memory");
     }
@@ -519,9 +542,12 @@ static void boot_greeting_task(void*)
     }
     GetHAL().onWsDanceData.emit(std::string(_boot_dance));
 
-    play_embedded_wav(_boot_jingle_wav_start, _boot_jingle_wav_end, "happy", false);
-    vTaskDelay(pdMS_TO_TICKS(150));
-    play_embedded_wav(_boot_greeting_wav_start, _boot_greeting_wav_end, "happy", true);
+    play_embedded_wav(_boot_jingle_wav_start, _boot_jingle_wav_end, "happy", false, true);
+    if (auto codec = Board::GetInstance().GetAudioCodec(); codec && codec->output_enabled()) {
+        // Pause after the jingle so the greeting does not run into it
+        write_silence(codec, 500);
+    }
+    play_embedded_wav(_boot_greeting_wav_start, _boot_greeting_wav_end, "happy", true, false);
 
     {
         LvglLockGuard lock;

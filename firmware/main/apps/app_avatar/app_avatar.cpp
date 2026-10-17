@@ -72,7 +72,8 @@ void AppAvatar::onOpen()
     }
 
     // Start avatar service
-    GetHAL().startWebSocketAvatarService([&](std::string_view msg) {
+    // Local HTTP API instead of the M5Stack cloud websocket (cloud auth is not available in self-built firmware)
+    GetHAL().startLocalApiService([&](std::string_view msg) {
         LvglLockGuard lock;
         loading_page->setMessage(msg);
     });
@@ -88,6 +89,7 @@ void AppAvatar::onOpen()
     avatar->init(lv_screen_active());
     avatar->getPanel()->onClick().connect([&]() { _screen_clicked_flag = true; });
     GetStackChan().attachAvatar(std::move(avatar));
+    GetStackChan().addModifier(std::make_unique<TimedSpeechModifier>(GetHAL().getLocalIp(), 10000));
 
     /* ------------------------------- BLE events ------------------------------- */
     GetHAL().onBleAvatarData.connect([&](const char* data) {

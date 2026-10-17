@@ -253,6 +253,11 @@ public:
 
     void startWebSocketAvatarService(std::function<void(std::string_view)> onStartLog);
 
+    /* -------------------------------- Local API ------------------------------- */
+    // Local HTTP API (port 80) for speech / motion / emotion control from the LAN
+    void startLocalApiService(std::function<void(std::string_view)> onStartLog);
+    std::string getLocalIp();
+
     /* ----------------------------------- IMU ---------------------------------- */
     uitk::Signal<ImuMotionEvent> onImuMotionEvent;
 

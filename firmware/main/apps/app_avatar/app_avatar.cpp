@@ -227,6 +227,9 @@ void AppAvatar::onOpen()
     /* ----------------------------- Common widgets ----------------------------- */
     view::create_home_indicator([&]() { close(); }, 0xFF9ABC, 0x431525);
     view::create_status_bar(0xFF9ABC, 0x431525);
+
+    // Announce that StackChan is up and the local API is ready (runs in its own task)
+    GetHAL().playBootGreeting();
 }
 
 void AppAvatar::onRunning()

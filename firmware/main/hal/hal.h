@@ -257,6 +257,8 @@ public:
     // Local HTTP API (port 80) for speech / motion / emotion control from the LAN
     void startLocalApiService(std::function<void(std::string_view)> onStartLog);
     std::string getLocalIp();
+    // Greeting voice + LED blink + nod so the user can tell StackChan is up and the API is ready
+    void playBootGreeting();
 
     /* ----------------------------------- IMU ---------------------------------- */
     uitk::Signal<ImuMotionEvent> onImuMotionEvent;

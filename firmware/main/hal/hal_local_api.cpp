@@ -23,6 +23,8 @@
 #include <esp_netif.h>
 #include <mdns.h>
 #include <esp_heap_caps.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <ArduinoJson.hpp>
 #include <algorithm>
 #include <cstring>
@@ -264,6 +266,51 @@ static std::vector<int16_t, PsramAllocator<int16_t>> to_output_pcm(const WavInfo
     return out;
 }
 
+// Play mono PCM at the codec output rate while flapping the mouth, with optional emotion / speech bubble.
+// Blocks until playback finishes.
+static void speak_pcm(const std::vector<int16_t, PsramAllocator<int16_t>>& pcm, AudioCodec* codec,
+                      const std::string& text, const std::string& emotion_name)
+{
+    const uint32_t duration_ms = pcm.size() * 1000ULL / codec->output_sample_rate();
+    mclog::tagInfo(_tag, "say: {} ms, emotion: {}, text: {}", duration_ms, emotion_name, text);
+
+    std::lock_guard<std::mutex> audio_lock(_audio_mutex);
+
+    // Face: mouth flapping + optional emotion / speech bubble for the length of the audio
+    {
+        LvglLockGuard lock;
+        auto& stackchan = GetStackChan();
+        if (stackchan.hasAvatar()) {
+            stackchan.addModifier(std::make_unique<SpeakingModifier>(duration_ms));
+            avatar::Emotion emotion;
+            if (!emotion_name.empty() && parse_emotion(emotion_name, emotion)) {
+                stackchan.addModifier(std::make_unique<TimedEmotionModifier>(emotion, duration_ms + 1500));
+            }
+            if (!text.empty()) {
+                stackchan.addModifier(std::make_unique<TimedSpeechModifier>(text, duration_ms + 1500));
+            }
+        }
+    }
+
+    // Blocks until playback finishes, so the client knows when StackChan is done talking
+    const int channels = std::max(codec->output_channels(), 1);
+    codec->EnableOutput(true);
+    std::vector<int16_t> chunk;
+    chunk.reserve(_playback_chunk_size * channels);
+    for (size_t pos = 0; pos < pcm.size(); pos += _playback_chunk_size) {
+        size_t n = std::min(_playback_chunk_size, pcm.size() - pos);
+        chunk.clear();
+        for (size_t i = 0; i < n; ++i) {
+            for (int c = 0; c < channels; ++c) {
+                chunk.push_back(pcm[pos + i]);
+            }
+        }
+        codec->OutputData(chunk);
+    }
+    codec->EnableOutput(false);
+
+}
+
 /* -------------------------------- Handlers -------------------------------- */
 
 static esp_err_t handle_status(httpd_req_t* req)
@@ -313,43 +360,7 @@ static esp_err_t handle_say(httpd_req_t* req)
     }
     heap_caps_free(body);
 
-    const uint32_t duration_ms = pcm.size() * 1000ULL / codec->output_sample_rate();
-    mclog::tagInfo(_tag, "say: {} ms, emotion: {}, text: {}", duration_ms, emotion_name, text);
-
-    std::lock_guard<std::mutex> audio_lock(_audio_mutex);
-
-    // Face: mouth flapping + optional emotion / speech bubble for the length of the audio
-    {
-        LvglLockGuard lock;
-        auto& stackchan = GetStackChan();
-        if (stackchan.hasAvatar()) {
-            stackchan.addModifier(std::make_unique<SpeakingModifier>(duration_ms));
-            avatar::Emotion emotion;
-            if (!emotion_name.empty() && parse_emotion(emotion_name, emotion)) {
-                stackchan.addModifier(std::make_unique<TimedEmotionModifier>(emotion, duration_ms + 1500));
-            }
-            if (!text.empty()) {
-                stackchan.addModifier(std::make_unique<TimedSpeechModifier>(text, duration_ms + 1500));
-            }
-        }
-    }
-
-    // Blocks until playback finishes, so the client knows when StackChan is done talking
-    const int channels = std::max(codec->output_channels(), 1);
-    codec->EnableOutput(true);
-    std::vector<int16_t> chunk;
-    chunk.reserve(_playback_chunk_size * channels);
-    for (size_t pos = 0; pos < pcm.size(); pos += _playback_chunk_size) {
-        size_t n = std::min(_playback_chunk_size, pcm.size() - pos);
-        chunk.clear();
-        for (size_t i = 0; i < n; ++i) {
-            for (int c = 0; c < channels; ++c) {
-                chunk.push_back(pcm[pos + i]);
-            }
-        }
-        codec->OutputData(chunk);
-    }
-    codec->EnableOutput(false);
+    speak_pcm(pcm, codec, text, emotion_name);
 
     return send_ok(req);
 }
@@ -452,6 +463,61 @@ static esp_err_t handle_led(httpd_req_t* req)
         LvglLockGuard lock;
         GetStackChan().updateNeonLightFromJson(payload.c_str());
     });
+}
+
+/* ------------------------------ Boot greeting ----------------------------- */
+
+extern const uint8_t _boot_greeting_wav_start[] asm("_binary_boot_greeting_wav_start");
+extern const uint8_t _boot_greeting_wav_end[] asm("_binary_boot_greeting_wav_end");
+
+// Nod while the LEDs blink green 3 times, then stay lit while the greeting plays (angles in 0.1 degree)
+static const char* _boot_dance = R"([
+  {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":0,"speed":500},"pitchServo":{"angle":150,"speed":500},"leftRgbColor":"#00A800","rightRgbColor":"#00A800","durationMs":250},
+  {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":0,"speed":500},"pitchServo":{"angle":0,"speed":500},"leftRgbColor":"#000000","rightRgbColor":"#000000","durationMs":250},
+  {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":0,"speed":500},"pitchServo":{"angle":150,"speed":500},"leftRgbColor":"#00A800","rightRgbColor":"#00A800","durationMs":250},
+  {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":0,"speed":500},"pitchServo":{"angle":0,"speed":500},"leftRgbColor":"#000000","rightRgbColor":"#000000","durationMs":250},
+  {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":0,"speed":400},"pitchServo":{"angle":0,"speed":400},"leftRgbColor":"#00A800","rightRgbColor":"#00A800","durationMs":250},
+  {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":0,"speed":400},"pitchServo":{"angle":0,"speed":400},"leftRgbColor":"#000000","rightRgbColor":"#000000","durationMs":250},
+  {"leftEye":{"weight":100},"rightEye":{"weight":100},"mouth":{"weight":0},"yawServo":{"angle":0,"speed":400},"pitchServo":{"angle":0,"speed":400},"leftRgbColor":"#00A800","rightRgbColor":"#00A800","durationMs":250}
+])";
+
+static void boot_greeting_task(void*)
+{
+    // Let the AVATAR app finish opening and connect its signal handlers
+    vTaskDelay(pdMS_TO_TICKS(800));
+
+    {
+        LvglLockGuard lock;
+        GetStackChan().leftNeonLight().setDuration(0.05f);
+        GetStackChan().rightNeonLight().setDuration(0.05f);
+    }
+    GetHAL().onWsDanceData.emit(std::string(_boot_dance));
+
+    auto codec = Board::GetInstance().GetAudioCodec();
+    WavInfo wav;
+    if (codec && parse_wav(_boot_greeting_wav_start, _boot_greeting_wav_end - _boot_greeting_wav_start, wav)) {
+        try {
+            auto pcm = to_output_pcm(wav, codec->output_sample_rate());
+            // Keep the IP address bubble that the AVATAR app shows on open
+            speak_pcm(pcm, codec, "", "happy");
+        } catch (const std::bad_alloc&) {
+            mclog::tagError(_tag, "boot greeting: out of memory");
+        }
+    } else {
+        mclog::tagError(_tag, "boot greeting: invalid embedded wav");
+    }
+
+    {
+        LvglLockGuard lock;
+        GetStackChan().leftNeonLight().setColor(0, 0, 0);
+        GetStackChan().rightNeonLight().setColor(0, 0, 0);
+    }
+    vTaskDelete(nullptr);
+}
+
+void Hal::playBootGreeting()
+{
+    xTaskCreate(boot_greeting_task, "boot_greeting", 8192, nullptr, 3, nullptr);
 }
 
 /* ---------------------------------- Setup --------------------------------- */

@@ -237,6 +237,10 @@ void AppAvatar::onOpen()
 
     // Announce that StackChan is up and the local API is ready (runs in its own task)
     GetHAL().playBootGreeting();
+
+    // Read new Gmail / Calendar items aloud while this app is open
+    GetHAL().startNotifyService();
+    GetHAL().setNotifyActive(true);
 }
 
 void AppAvatar::onRunning()
@@ -276,6 +280,8 @@ void AppAvatar::onRunning()
 void AppAvatar::onClose()
 {
     mclog::tagInfo(getAppInfo().name, "on close");
+
+    GetHAL().setNotifyActive(false);
 
     {
         LvglLockGuard lock;

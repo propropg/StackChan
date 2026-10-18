@@ -15,6 +15,8 @@
 #include <array>
 #include <lvgl_image.h>
 #include <string_view>
+#include "utils/psram_allocator.h"
+#include <ArduinoJson.hpp>
 
 /**
  * @brief
@@ -108,6 +110,55 @@ enum class WifiStatus {
 struct UserAccountInfo_t {
     std::string username;
     std::string deviceName;
+};
+
+/**
+ * @brief Cloud VOICEVOX speech settings
+ *
+ */
+struct VoicevoxConfig_t {
+    bool enabled = false;
+    std::string apiKey;
+    int speaker      = 3;  // ずんだもん (ノーマル)
+    float speed      = 1.0f;
+    float pitch      = 0.0f;
+    float intonation = 1.0f;
+    std::string greetingText = "こんにちは！スタックチャンだよ。";
+};
+
+/**
+ * @brief Speech + head motion + LED blink, run on the device (settings page buttons, Claude Code events)
+ *
+ */
+struct Action_t {
+    std::string text;            // spoken with VOICEVOX; empty = motion / LEDs only
+    std::string emotion;         // neutral / happy / angry / sad / doubt / sleepy, empty = keep
+    std::string motion = "none";  // none / nod / bow / look / shake
+    std::string bubble;          // speech bubble text, empty = none
+    std::string ledColor;        // "#RRGGBB", empty = no LEDs
+    int ledBlinks = 3;
+
+    static Action_t fromJson(ArduinoJson::JsonVariantConst json);
+    void toJson(ArduinoJson::JsonObject json) const;
+};
+
+/**
+ * @brief Gmail / Calendar notifications through the Apps Script relay
+ *
+ */
+struct NotifyConfig_t {
+    bool enabled = false;
+    std::string url;  // web app url including ?token=
+    int intervalSec = 120;
+    bool quietHours = true;  // no announcements between quietStart and quietEnd (hours, local time)
+    int quietStart  = 22;
+    int quietEnd    = 7;
+};
+
+struct NotifyStatus_t {
+    int64_t lastCheckUs = 0;  // esp_timer time of the last poll, 0 = never
+    int lastCount       = 0;
+    std::string lastError;
 };
 
 /**
@@ -261,6 +312,44 @@ public:
     void playBootGreeting();
     // (Re)create the idle animation modifiers from the saved settings. Call with the LVGL lock held.
     void applyIdleModifiers();
+    // Synthesize text with cloud VOICEVOX and play it (mouth flapping / emotion / bubble when the avatar is up).
+    // Empty bubble shows none. Blocks until playback ends. Returns false with error set when synthesis fails
+    // (nothing is played).
+    bool speakText(const std::string& text, const std::string& emotion, const std::string& bubble, std::string& error);
+    // Play a 16-bit PCM WAV like speakText does (blocks until playback ends)
+    bool playWav(const uint8_t* data, size_t size, const std::string& emotion, const std::string& bubble,
+                 std::string& error);
+
+    /* --------------------------------- Actions -------------------------------- */
+    // Speak (VOICEVOX) with a head motion and LED blinks. Synthesizes before moving, so on failure nothing
+    // happens and error is set. Blocks until done.
+    bool runAction(const Action_t& action, std::string& error);
+    // Claude Code event templates ("stop", "notification", "sessionEnd") stored on the device
+    std::string getEventsJson();
+    void setEventsJson(ArduinoJson::JsonVariantConst json);
+    // Run an event's template with {session} filled in. Fails with "voicevox disabled" when VOICEVOX is off
+    // so the PC hook can fall back to its own voice.
+    bool runEvent(std::string_view name, std::string_view session, std::string& error);
+
+    /* ------------------------------ Notifications ----------------------------- */
+    // Polls the Apps Script relay (tools/gas/stackchan_notify.gs) and reads new Gmail / Calendar items aloud
+    NotifyConfig_t getNotifyConfig();
+    void setNotifyConfig(const NotifyConfig_t& config);
+    NotifyStatus_t getNotifyStatus();
+    // Starts the polling task once; it only polls while notifications are active (AVATAR app open)
+    void startNotifyService();
+    void setNotifyActive(bool active);
+    // Poll right now regardless of the interval / quiet hours; speaks what it finds. Blocks.
+    bool checkNotificationsNow(int& count, std::string& error);
+
+    /* -------------------------------- VOICEVOX -------------------------------- */
+    // Cloud VOICEVOX (WEB版VOICEVOX API by su-shiki), configured from the web settings page or SETUP
+    VoicevoxConfig_t getVoicevoxConfig();
+    void setVoicevoxConfig(const VoicevoxConfig_t& config);
+    // Returns a 16-bit PCM WAV in wav, or false with error set (Wi-Fi down, invalidApiKey, notEnoughPoints, ...)
+    bool voicevoxSynthesize(std::string_view text, PsramBytes& wav, std::string& error);
+    // GET a JSON endpoint of the API with the saved key ("speakers" or "points")
+    bool voicevoxFetchJson(std::string_view endpoint, std::string& out, std::string& error);
 
     /* ----------------------------------- IMU ---------------------------------- */
     uitk::Signal<ImuMotionEvent> onImuMotionEvent;

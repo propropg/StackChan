@@ -1,0 +1,691 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>スタックチャン</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --panel: #ffffff; --text: #1f2328; --muted: #6b7078; --line: #e3e1dc;
+    --accent: #d9572b; --accent-text: #ffffff; --ok: #2f8f4e; --err: #c0392b; --chip: #f0eeea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181b; --panel: #212328; --text: #e8e6e3; --muted: #9a9ea6; --line: #33363d;
+      --accent: #f07a4f; --accent-text: #1a1a1a; --ok: #4cc27f; --err: #ff7a6b; --chip: #2b2e34;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.6 "Hiragino Sans", "Yu Gothic UI", "Meiryo", system-ui, sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line);
+           background: var(--panel); position: sticky; top: 0; z-index: 2; }
+  header h1 { font-size: 17px; margin: 0; flex: 1; }
+  .status { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .dot.ok { background: var(--ok); } .dot.err { background: var(--err); }
+  nav { display: flex; gap: 4px; padding: 8px 12px; overflow-x: auto; background: var(--panel);
+        border-bottom: 1px solid var(--line); position: sticky; top: 53px; z-index: 1; }
+  nav button { border: 0; background: none; color: var(--muted); padding: 8px 12px; border-radius: 8px;
+               font: inherit; white-space: nowrap; cursor: pointer; }
+  nav button.active { background: var(--chip); color: var(--text); font-weight: 600; }
+  main { max-width: 760px; margin: 0 auto; padding: 16px; }
+  section { display: none; } section.active { display: block; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+  .card h2 { font-size: 15px; margin: 0 0 12px; }
+  .card h3 { font-size: 14px; margin: 0 0 4px; }
+  .hint { color: var(--muted); font-size: 13px; margin: 4px 0 0; }
+  .hint a { color: var(--accent); }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  input[type=text], input[type=password], textarea, select { width: 100%; padding: 9px 10px; border: 1px solid var(--line);
+         border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; }
+  textarea { min-height: 80px; resize: vertical; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  input[type=color] { width: 56px; height: 38px; border: 1px solid var(--line); border-radius: 8px; background: none; padding: 2px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+  .row > * { flex: 1 1 140px; }
+  .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  button.b { border: 1px solid var(--line); background: var(--chip); color: var(--text); padding: 9px 14px;
+             border-radius: 8px; font: inherit; cursor: pointer; }
+  button.b:hover { border-color: var(--muted); }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+  button.danger { color: var(--err); }
+  button:disabled { opacity: .5; cursor: default; }
+  .toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0;
+            border-bottom: 1px solid var(--line); }
+  .toggle:last-child { border-bottom: 0; }
+  .toggle input { width: 20px; height: 20px; accent-color: var(--accent); flex: none; }
+  .val { font-variant-numeric: tabular-nums; color: var(--text); font-weight: 600; }
+  .pad { position: relative; width: 100%; max-width: 320px; aspect-ratio: 2 / 1; margin: 6px auto 0;
+         background: var(--bg); border: 1px solid var(--line); border-radius: 12px; touch-action: none; cursor: crosshair; }
+  .pad .knob { position: absolute; width: 22px; height: 22px; margin: -11px 0 0 -11px; border-radius: 50%;
+               background: var(--accent); box-shadow: 0 1px 4px rgba(0,0,0,.3); pointer-events: none; }
+  .pad .axis { position: absolute; left: 50%; top: 0; bottom: 0; border-left: 1px dashed var(--line); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; }
+  .event { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 12px; }
+  .event:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+  .info { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: 14px; }
+  .info dt { color: var(--muted); } .info dd { margin: 0; overflow-wrap: anywhere; }
+  .keyline { display: flex; gap: 8px; } .keyline input { flex: 1; }
+  .hours { display: flex; align-items: center; gap: 6px; } .hours select { width: auto; }
+  code { font-size: 12px; }
+  #toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--text); color: var(--bg);
+           padding: 10px 16px; border-radius: 10px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none;
+           max-width: calc(100% - 32px); }
+  #toast.show { opacity: .95; }
+</style>
+</head>
+<body>
+<header>
+  <h1>スタックチャン</h1>
+  <div class="status"><span class="dot" id="dot"></span><span id="statusText">接続確認中…</span></div>
+</header>
+<nav id="tabs">
+  <button data-tab="say" class="active">話す</button>
+  <button data-tab="move">動き</button>
+  <button data-tab="face">表情・LED</button>
+  <button data-tab="voice">声</button>
+  <button data-tab="notify">通知</button>
+  <button data-tab="device">本体設定</button>
+</nav>
+<main>
+
+<!-- 話す -->
+<section id="say" class="active">
+  <div class="card">
+    <h2>好きな言葉を喋らせる</h2>
+    <textarea id="sayText" placeholder="例: 会議の時間だよ"></textarea>
+    <div class="row">
+      <div><label>表情</label><select id="sayEmotion"></select></div>
+      <div><label>動き</label><select id="sayMotion"></select></div>
+      <div><label>吹き出し（空欄なら出さない）</label><input type="text" id="sayBubble" placeholder="こんにちは！"></div>
+    </div>
+    <div class="row">
+      <div style="flex:0 0 auto"><label>LED</label><input type="color" id="sayLed" value="#00ff00"></div>
+      <div><label>LED点滅 <span class="val" id="sayBlinksVal">3</span> 回（0でLEDなし）</label>
+        <input type="range" id="sayBlinks" min="0" max="8" value="3"></div>
+    </div>
+    <div class="btns"><button class="b primary" id="sayBtn">喋らせる</button></div>
+    <p class="hint">声は「声」タブの VOICEVOX の設定でしゃべります。</p>
+  </div>
+  <div class="card">
+    <h2>定型文</h2>
+    <div class="grid" id="phrases"></div>
+    <p class="hint">押すとすぐに喋ります（表情・動き・LED は上の設定を使います）。</p>
+  </div>
+</section>
+
+<!-- 動き -->
+<section id="move">
+  <div class="card">
+    <h2>首の向き</h2>
+    <div class="pad" id="pad"><div class="axis"></div><div class="knob" id="knob"></div></div>
+    <p class="hint" style="text-align:center">パッドをドラッグすると首がついてきます（左右 ±90°、上下 0〜90°）</p>
+    <div class="row">
+      <div><label>左右 <span class="val" id="yawVal">0</span>°</label><input type="range" id="yaw" min="-128" max="128" value="0"></div>
+      <div><label>上下 <span class="val" id="pitchVal">0</span>°</label><input type="range" id="pitch" min="0" max="90" value="0"></div>
+      <div><label>速さ <span class="val" id="speedVal">300</span></label><input type="range" id="speed" min="100" max="1000" step="50" value="300"></div>
+    </div>
+    <div class="btns">
+      <button class="b" id="centerBtn">正面に戻す</button>
+      <button class="b" id="readBtn">今の角度を読む</button>
+    </div>
+  </div>
+  <div class="card">
+    <h2>動きのプリセット</h2>
+    <div class="grid">
+      <button class="b" data-motion="nod">うなずく</button>
+      <button class="b" data-motion="bow">おじぎ</button>
+      <button class="b" data-motion="look">首をかしげる</button>
+      <button class="b" data-motion="shake">首を横に振る</button>
+    </div>
+  </div>
+  <div class="card">
+    <h2>ダンス</h2>
+    <div class="grid" id="dances"></div>
+    <p class="hint">画面をタップするとダンスを止められます。</p>
+  </div>
+</section>
+
+<!-- 表情・LED -->
+<section id="face">
+  <div class="card">
+    <h2>表情</h2>
+    <div class="row">
+      <div><label>表示する時間</label>
+        <select id="emotionMs">
+          <option value="3000">3秒</option><option value="10000">10秒</option><option value="60000">1分</option>
+          <option value="0">ずっと（次に変えるまで）</option>
+        </select></div>
+    </div>
+    <div class="grid" id="emotions" style="margin-top:12px"></div>
+  </div>
+  <div class="card">
+    <h2>LED</h2>
+    <div class="row">
+      <div style="flex:0 0 auto"><label>左</label><input type="color" id="ledLeft" value="#ff8800"></div>
+      <div style="flex:0 0 auto"><label>右</label><input type="color" id="ledRight" value="#ff8800"></div>
+      <div><label><input type="checkbox" id="ledLink" checked> 左右を同じ色にする</label></div>
+    </div>
+    <div class="btns">
+      <button class="b primary" id="ledOn">点灯</button>
+      <button class="b" id="ledOff">消灯</button>
+    </div>
+    <p class="hint">明るさは本体の安全範囲（各色 168/255 まで）に自動で抑えます。</p>
+  </div>
+</section>
+
+<!-- 声 -->
+<section id="voice">
+  <div class="card">
+    <h2>VOICEVOX（クラウド）</h2>
+    <div class="toggle"><span>VOICEVOX でしゃべる</span><input type="checkbox" id="vvEnabled"></div>
+    <p class="hint">オフ、またはつながらないときは従来の声（起動時は内蔵のあいさつ、Claude Code の通知は PC の声）でしゃべります。</p>
+
+    <label>API キー</label>
+    <div class="keyline">
+      <input type="password" id="vvKey" autocomplete="off" placeholder="未設定">
+      <button type="button" class="b" id="vvKeyClear">削除</button>
+    </div>
+    <p class="hint">キーは <a href="https://su-shiki.com/api/" target="_blank" rel="noopener">su-shiki.com/api</a> で発行できます。空欄のまま保存すると、今のキーをそのまま使います。</p>
+
+    <label>話者</label>
+    <select id="vvSpeaker"><option value="3">ずんだもん（ノーマル）</option></select>
+
+    <div class="row">
+      <div><label>話速 <span class="val" id="vvSpeedVal"></span></label><input type="range" id="vvSpeed" min="0.5" max="2" step="0.05"></div>
+      <div><label>ピッチ <span class="val" id="vvPitchVal"></span></label><input type="range" id="vvPitch" min="-0.15" max="0.15" step="0.01"></div>
+      <div><label>抑揚 <span class="val" id="vvIntonationVal"></span></label><input type="range" id="vvIntonation" min="0" max="2" step="0.05"></div>
+    </div>
+
+    <label>起動時のあいさつ</label>
+    <input type="text" id="vvGreeting" maxlength="200">
+
+    <label>テストする文</label>
+    <input type="text" id="vvTestText" value="こんにちは、スタックチャンだよ。" maxlength="200">
+    <div class="btns">
+      <button class="b primary" id="vvSave">保存</button>
+      <button class="b" id="vvTest">保存してしゃべらせる</button>
+      <button class="b" id="vvPoints">残りポイントを確認</button>
+    </div>
+    <p class="hint" id="vvPointsText">1回あたり 1500 + 100 × 文字数（UTF-8のバイト数）ポイントを使います。1日の上限はおよそ 1,000 万ポイントです。</p>
+  </div>
+</section>
+
+<!-- 通知 -->
+<section id="notify">
+  <div class="card">
+    <h2>Claude Code の通知</h2>
+    <p class="hint" style="margin-top:0">{session} はセッション名に置き換わります。PC の Claude Code から届いた通知を、ここの設定でしゃべります。</p>
+    <div id="events" style="margin-top:12px"></div>
+    <div class="btns"><button class="b primary" id="saveEvents">保存</button></div>
+  </div>
+
+  <div class="card">
+    <h2>Gmail・カレンダー</h2>
+    <div class="toggle"><span>新着メールと予定を読み上げる</span><input type="checkbox" id="ntEnabled"></div>
+    <p class="hint">Google Apps Script の中継（tools/gas/stackchan_notify.gs）を定期的に確認します。AVATAR を開いている間だけ動きます。</p>
+
+    <label>中継の URL（<code>…/exec?token=…</code>）</label>
+    <div class="keyline">
+      <input type="text" id="ntUrl" autocomplete="off" spellcheck="false" placeholder="未設定">
+      <button type="button" class="b" id="ntUrlClear">削除</button>
+    </div>
+    <p class="hint">URL にはアクセス用のトークンが入っているので、本体には末尾だけ表示します。空欄のまま保存すると、今の URL をそのまま使います。</p>
+
+    <div class="row">
+      <div><label>確認する間隔</label>
+        <select id="ntInterval">
+          <option value="60">1分</option><option value="120">2分</option><option value="300">5分</option>
+          <option value="600">10分</option><option value="900">15分</option>
+        </select></div>
+      <div><label>読み上げない時間</label>
+        <span class="hours"><select id="ntQuietStart"></select> 時 〜 <select id="ntQuietEnd"></select> 時</span></div>
+    </div>
+    <div class="toggle" style="margin-top:8px"><span>夜は読み上げない</span><input type="checkbox" id="ntQuiet"></div>
+
+    <div class="btns">
+      <button class="b primary" id="ntSave">保存</button>
+      <button class="b" id="ntCheck">保存して今すぐ確認</button>
+    </div>
+    <p class="hint" id="ntStatus"></p>
+  </div>
+</section>
+
+<!-- 本体設定 -->
+<section id="device">
+  <div class="card">
+    <h2>音と画面</h2>
+    <label>スピーカー音量 <span class="val" id="volVal">-</span></label><input type="range" id="vol" min="0" max="100" step="5">
+    <label>画面の明るさ <span class="val" id="briVal">-</span></label><input type="range" id="bri" min="1" max="100" step="1">
+    <label>タイムゾーン</label>
+    <select id="tz">
+      <option value="JST-9">日本（JST）</option><option value="UTC0">UTC</option>
+      <option value="CST-8">中国・台湾（UTC+8）</option><option value="KST-9">韓国（KST）</option>
+      <option value="EST5EDT,M3.2.0,M11.1.0">米国東部</option><option value="PST8PDT,M3.2.0,M11.1.0">米国西部</option>
+      <option value="CET-1CEST,M3.5.0,M10.5.0/3">中央ヨーロッパ</option>
+    </select>
+  </div>
+  <div class="card">
+    <h2>待機中の動き</h2>
+    <label>首の動き</label>
+    <select id="idleLevel">
+      <option value="0">しない</option><option value="1">控えめ（8〜12秒おき）</option>
+      <option value="2">普通（4〜8秒おき）</option><option value="3">活発（2〜4秒おき）</option>
+    </select>
+    <div style="margin-top:8px">
+      <div class="toggle"><span>まばたき</span><input type="checkbox" data-idle="blink"></div>
+      <div class="toggle"><span>呼吸（顔がゆっくり揺れる）</span><input type="checkbox" data-idle="breath"></div>
+      <div class="toggle"><span>表情の変化</span><input type="checkbox" data-idle="idleExpression"></div>
+      <div class="toggle"><span>頭をなでると喜ぶ</span><input type="checkbox" data-idle="headPet"></div>
+      <div class="toggle"><span>持ち上げ・揺れに反応</span><input type="checkbox" data-idle="imu"></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>サーボ（首のモーター）</h2>
+    <div class="btns">
+      <button class="b" id="servoOn">電源オン</button>
+      <button class="b" id="servoOff">電源オフ（手で動かせる）</button>
+    </div>
+    <p class="hint">首の正面がずれているときは、電源オフ → 手で正面に合わせる → 「今の位置を正面にする」。</p>
+    <div class="btns">
+      <button class="b" id="calibrate">今の位置を正面にする</button>
+      <button class="b danger" id="resetCal">正面の調整をリセット</button>
+    </div>
+  </div>
+  <div class="card">
+    <h2>本体の情報</h2>
+    <dl class="info" id="devInfo"></dl>
+    <div class="btns">
+      <button class="b" id="refreshInfo">更新</button>
+      <button class="b danger" id="reboot">再起動</button>
+    </div>
+    <p class="hint">Wi-Fi の変更は本体の SETUP 画面から行います（ここから変えると接続が切れて戻せなくなるため）。</p>
+  </div>
+</section>
+
+</main>
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const EMOTIONS = [["neutral","ふつう"],["happy","うれしい"],["sad","かなしい"],["angry","おこる"],["doubt","はてな"],["sleepy","ねむい"]];
+const MOTIONS = [["none","なし"],["nod","うなずく"],["bow","おじぎ"],["look","首をかしげる"],["shake","首を横に振る"]];
+const PHRASES = ["おはよう！","お疲れさま","休憩しよう","会議の時間だよ","ありがとう","いってらっしゃい","おかえり","がんばって！"];
+const EVENT_KEYS = ["stop", "notification", "sessionEnd"];
+const EVENT_LABELS = { stop: "処理が完了したとき", notification: "確認待ちのとき", sessionEnd: "Claude Code を終了したとき" };
+const ERROR_TEXT = {
+  invalidApiKey: "VOICEVOX の API キーが正しくありません",
+  notEnoughPoints: "VOICEVOX の今日のポイントを使い切りました",
+  failed: "VOICEVOX での音声合成に失敗しました",
+  "Wi-Fi not connected": "Wi-Fi につながっていません",
+  "voicevox disabled": "「声」タブで VOICEVOX がオフになっています",
+};
+
+let settings = null;  // last GET /api/settings
+let clearKey = false, clearUrl = false;
+
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.classList.remove("show"), 3200);
+}
+
+async function call(method, path, body) {
+  const opt = { method, headers: {} };
+  if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+  const res = await fetch(path, opt);
+  let data = {};
+  try { data = await res.json(); } catch (e) {}
+  if (!res.ok || data.ok === false) {
+    const err = data.error || ("HTTP " + res.status);
+    throw new Error(ERROR_TEXT[err] || err);
+  }
+  return data;
+}
+const get = (p) => call("GET", p);
+const post = (p, b) => call("POST", p, b === undefined ? {} : b);
+
+async function run(btn, fn, okMsg) {
+  if (btn) btn.disabled = true;
+  try { await fn(); if (okMsg) toast(okMsg); }
+  catch (e) { toast("エラー: " + e.message); }
+  finally { if (btn) btn.disabled = false; }
+}
+
+// Keep LEDs inside the firmware's safe range (each channel <= 168)
+function safeColor(hex) {
+  const v = parseInt(hex.slice(1), 16);
+  const ch = [(v >> 16) & 255, (v >> 8) & 255, v & 255].map((c) => Math.round(c * 168 / 255));
+  return "#" + ch.map((c) => c.toString(16).padStart(2, "0")).join("").toUpperCase();
+}
+// Stored colors are scaled to 168 max; show them at full brightness in the picker
+function toPicker(hex) {
+  if (!hex || hex.length !== 7) return "#00ff00";
+  const v = parseInt(hex.slice(1), 16);
+  return "#" + [(v >> 16) & 255, (v >> 8) & 255, v & 255].map((c) => Math.min(255, Math.round(c * 255 / 168)).toString(16).padStart(2, "0")).join("");
+}
+const escapeAttr = (s) => String(s || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+
+function fillSelect(sel, items, value) {
+  sel.innerHTML = items.map(([v, l]) => `<option value="${v}">${l}</option>`).join("");
+  if (value !== undefined) sel.value = value;
+}
+function bindRange(id, format) {
+  const update = () => { $(id + "Val").textContent = format(+$(id).value); };
+  $(id).addEventListener("input", update);
+  return update;
+}
+
+// ---- tabs ----
+$("tabs").addEventListener("click", (e) => {
+  const tab = e.target.dataset.tab; if (!tab) return;
+  document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+  document.querySelectorAll("section").forEach((s) => s.classList.toggle("active", s.id === tab));
+  try { localStorage.setItem("tab", tab); } catch (e) {}
+  if (tab === "device" || tab === "notify") loadSettings();
+});
+
+// ---- status ----
+async function refreshStatus() {
+  try {
+    const s = await get("/api/status");
+    $("dot").className = "dot ok";
+    $("statusText").textContent = s.avatar ? "接続中 " + s.ip : "接続中（AVATAR画面ではありません）";
+  } catch (e) {
+    $("dot").className = "dot err"; $("statusText").textContent = "未接続";
+  }
+}
+
+// ---- say ----
+fillSelect($("sayEmotion"), EMOTIONS, "happy");
+fillSelect($("sayMotion"), MOTIONS, "nod");
+$("sayBlinks").oninput = () => $("sayBlinksVal").textContent = $("sayBlinks").value;
+function sayAction(text) {
+  const blinks = +$("sayBlinks").value;
+  return { text, emotion: $("sayEmotion").value, motion: $("sayMotion").value, bubble: $("sayBubble").value.trim(),
+           ledColor: blinks > 0 ? safeColor($("sayLed").value) : "", ledBlinks: blinks };
+}
+$("sayBtn").onclick = () => {
+  const text = $("sayText").value.trim();
+  if (!text) return toast("言葉を入力してください");
+  run($("sayBtn"), () => post("/api/action", sayAction(text)), "喋り終わりました");
+};
+$("phrases").innerHTML = PHRASES.map((p) => `<button class="b">${p}</button>`).join("");
+$("phrases").onclick = (e) => { if (e.target.tagName === "BUTTON") run(e.target, () => post("/api/action", sayAction(e.target.textContent))); };
+
+// ---- move ----
+let moveTimer = null, pending = null;
+function sendMove(yaw, pitch) {
+  pending = { yaw, pitch, speed: +$("speed").value };
+  if (moveTimer) return;
+  moveTimer = setTimeout(async () => {
+    const m = pending; moveTimer = null;
+    try { await post("/api/motion", m); } catch (e) { toast("エラー: " + e.message); }
+  }, 120);
+}
+function setAngles(yaw, pitch, send) {
+  $("yaw").value = yaw; $("pitch").value = pitch;
+  $("yawVal").textContent = yaw; $("pitchVal").textContent = pitch;
+  // Percent positions so the knob is right even while the tab is hidden; left on screen = StackChan's right
+  const knob = $("knob"), clampedYaw = Math.max(-90, Math.min(90, yaw));
+  knob.style.left = ((1 - (clampedYaw + 90) / 180) * 100) + "%";
+  knob.style.top = ((1 - pitch / 90) * 100) + "%";
+  if (send) sendMove(yaw, pitch);
+}
+["yaw", "pitch"].forEach((id) => $(id).oninput = () => setAngles(+$("yaw").value, +$("pitch").value, true));
+$("speed").oninput = () => $("speedVal").textContent = $("speed").value;
+(function () {
+  const pad = $("pad"); let dragging = false;
+  const fromEvent = (e) => {
+    const r = pad.getBoundingClientRect();
+    const x = Math.min(Math.max(e.clientX - r.left, 0), r.width), y = Math.min(Math.max(e.clientY - r.top, 0), r.height);
+    setAngles(Math.round(90 - x / r.width * 180), Math.round(90 - y / r.height * 90), true);
+  };
+  pad.addEventListener("pointerdown", (e) => { dragging = true; pad.setPointerCapture(e.pointerId); fromEvent(e); });
+  pad.addEventListener("pointermove", (e) => { if (dragging) fromEvent(e); });
+  pad.addEventListener("pointerup", () => dragging = false);
+})();
+$("centerBtn").onclick = () => setAngles(0, 0, true);
+$("readBtn").onclick = () => run($("readBtn"), async () => { const s = await get("/api/state"); setAngles(s.yaw, s.pitch, false); });
+document.querySelectorAll("[data-motion]").forEach((b) =>
+  b.onclick = () => run(b, () => post("/api/action", { motion: b.dataset.motion })));
+
+function kf(yaw, pitch, speed, ms, color, eyes, mouth) {
+  return { leftEye: { weight: eyes ?? 100 }, rightEye: { weight: eyes ?? 100 }, mouth: { weight: mouth ?? 0 },
+           yawServo: { angle: yaw * 10, speed }, pitchServo: { angle: pitch * 10, speed },
+           leftRgbColor: color || "#000000", rightRgbColor: color || "#000000", durationMs: ms };
+}
+const DANCES = {
+  "ゆらゆら": [kf(0,0,200,500), kf(30,10,200,800,"#A80050",50,50), kf(-30,10,200,800,"#5000A8",50,50),
+               kf(30,10,200,800,"#A80050",50,50), kf(-30,10,200,800,"#5000A8",50,50), kf(0,0,200,500)],
+  "ロボット": [kf(0,0,500,500,"#00A8A8"), kf(45,0,800,400,"#00A8A8"), kf(45,20,800,400,"#A8A800"),
+               kf(-45,20,800,600,"#A8A800"), kf(-45,0,800,400,"#00A8A8"), kf(0,0,800,400)],
+  "きょろきょろ": [kf(40,20,600,600), kf(-40,20,600,700), kf(20,40,500,600), kf(-20,5,500,600), kf(0,0,300,500)],
+  "パニック": [kf(20,10,1000,100,"#A80000",100,100), kf(-20,0,1000,100,"#A8A800",100,100), kf(20,10,1000,100,"#A80000",100,100),
+               kf(-20,0,1000,100,"#A8A800",100,100), kf(20,10,1000,100,"#A80000",100,100), kf(0,0,200,500)],
+};
+$("dances").innerHTML = Object.keys(DANCES).map((n) => `<button class="b">${n}</button>`).join("");
+$("dances").onclick = (e) => { if (e.target.tagName === "BUTTON") run(e.target, () => post("/api/dance", DANCES[e.target.textContent])); };
+
+// ---- face / LED ----
+$("emotions").innerHTML = EMOTIONS.map(([v, l]) => `<button class="b" data-emotion="${v}">${l}</button>`).join("");
+$("emotions").onclick = (e) => {
+  const v = e.target.dataset.emotion; if (!v) return;
+  run(e.target, () => post(`/api/emotion?name=${v}&ms=${$("emotionMs").value}`));
+};
+$("ledLeft").oninput = () => { if ($("ledLink").checked) $("ledRight").value = $("ledLeft").value; };
+$("ledOn").onclick = () => run($("ledOn"), () => post("/api/led", {
+  leftRgbColor: safeColor($("ledLeft").value), rightRgbColor: safeColor($("ledLink").checked ? $("ledLeft").value : $("ledRight").value) }));
+$("ledOff").onclick = () => run($("ledOff"), () => post("/api/led", { leftRgbColor: "#000000", rightRgbColor: "#000000" }));
+
+// ---- settings (voice / notify / device share GET /api/settings) ----
+const rangeUpdaters = [
+  bindRange("vvSpeed", (v) => v.toFixed(2) + " 倍"),
+  bindRange("vvPitch", (v) => (v > 0 ? "+" : "") + v.toFixed(2)),
+  bindRange("vvIntonation", (v) => v.toFixed(2)),
+];
+for (const id of ["ntQuietStart", "ntQuietEnd"]) {
+  for (let h = 0; h < 24; h++) $(id).add(new Option(String(h), String(h)));
+}
+
+function ensureSpeakerOption(id) {
+  const select = $("vvSpeaker");
+  if (![...select.options].some((o) => o.value === String(id))) select.add(new Option("ID " + id, String(id)));
+}
+
+function notifyStatusText(nt) {
+  if (!nt.urlSet) return "中継の URL が未設定です。";
+  if (nt.lastCheckAgoSec < 0) return "まだ確認していません。";
+  const ago = nt.lastCheckAgoSec < 60 ? nt.lastCheckAgoSec + "秒前" : Math.round(nt.lastCheckAgoSec / 60) + "分前";
+  if (nt.lastError) return "最後の確認（" + ago + "）は失敗しました: " + nt.lastError;
+  return "最後の確認: " + ago + "（" + nt.lastCount + "件）";
+}
+
+function showSettings(s) {
+  settings = s;
+  // Voice
+  const vv = s.voicevox || {};
+  $("vvEnabled").checked = !!vv.enabled;
+  $("vvKey").value = "";
+  $("vvKey").placeholder = vv.apiKeySet ? "設定済み（末尾 " + vv.apiKeyHint + "）" : "未設定";
+  clearKey = false;
+  ensureSpeakerOption(vv.speaker);
+  $("vvSpeaker").value = String(vv.speaker);
+  $("vvSpeed").value = vv.speed; $("vvPitch").value = vv.pitch; $("vvIntonation").value = vv.intonation;
+  $("vvGreeting").value = vv.greetingText || "";
+  rangeUpdaters.forEach((f) => f());
+  // Notify
+  const nt = s.notify || {};
+  $("ntEnabled").checked = !!nt.enabled;
+  $("ntUrl").value = "";
+  $("ntUrl").placeholder = nt.urlSet ? "設定済み（末尾 " + nt.urlHint + "）" : "未設定";
+  clearUrl = false;
+  $("ntInterval").value = String(nt.intervalSec);
+  if (!$("ntInterval").value) $("ntInterval").add(new Option(nt.intervalSec + "秒", String(nt.intervalSec), true, true));
+  $("ntQuiet").checked = !!nt.quietHours;
+  $("ntQuietStart").value = String(nt.quietStart); $("ntQuietEnd").value = String(nt.quietEnd);
+  $("ntStatus").textContent = notifyStatusText(nt);
+  // Device
+  $("vol").value = s.volume; $("volVal").textContent = s.volume;
+  $("bri").value = s.brightness; $("briVal").textContent = s.brightness;
+  if ([...$("tz").options].some((o) => o.value === s.timezone)) $("tz").value = s.timezone;
+  $("idleLevel").value = s.idleMotionLevel;
+  document.querySelectorAll("[data-idle]").forEach((c) => c.checked = !!s[c.dataset.idle]);
+  const d = s.device || {}, up = d.uptimeSec || 0;
+  $("devInfo").innerHTML = [
+    ["IPアドレス", d.ip], ["ファーム", d.firmware], ["バッテリー", `${d.battery}%${d.charging ? "（充電中）" : ""}`],
+    ["空きメモリ", Math.round((d.freeHeap || 0) / 1024) + " KB"], ["起動からの時間", `${Math.floor(up / 3600)}時間${Math.floor(up % 3600 / 60)}分`],
+  ].map(([k, v]) => `<dt>${k}</dt><dd>${v ?? "-"}</dd>`).join("");
+}
+async function loadSettings() { try { showSettings(await get("/api/settings")); } catch (e) { toast("本体の設定を読めません: " + e.message); } }
+const saveSettings = async (patch) => showSettings(await post("/api/settings", patch));
+
+// ---- voice ----
+async function loadSpeakers() {
+  try {
+    const list = await get("/api/voicevox/speakers");
+    const select = $("vvSpeaker"), selected = select.value;
+    select.innerHTML = "";
+    for (const speaker of list) {
+      const group = document.createElement("optgroup");
+      group.label = speaker.name;
+      for (const style of speaker.styles || []) {
+        if (style.type && style.type !== "talk") continue;
+        group.appendChild(new Option(speaker.name + "（" + style.name + "）", String(style.id)));
+      }
+      select.appendChild(group);
+    }
+    ensureSpeakerOption(selected);
+    select.value = selected;
+  } catch (e) {
+    $("vvSpeaker").title = "話者一覧を取得できませんでした: " + e.message;
+  }
+}
+function collectVoice() {
+  const voicevox = {
+    enabled: $("vvEnabled").checked, speaker: +$("vvSpeaker").value, speed: +$("vvSpeed").value,
+    pitch: +$("vvPitch").value, intonation: +$("vvIntonation").value, greetingText: $("vvGreeting").value.trim(),
+  };
+  const key = $("vvKey").value.trim();
+  if (key) voicevox.apiKey = key; else if (clearKey) voicevox.apiKey = "";
+  return voicevox;
+}
+async function saveVoice() {
+  const keyChanged = !!$("vvKey").value.trim() || clearKey;
+  await saveSettings({ voicevox: collectVoice() });
+  if (keyChanged) loadSpeakers();
+}
+$("vvKeyClear").onclick = () => { clearKey = true; $("vvKey").value = ""; $("vvKey").placeholder = "未設定（保存すると削除）"; };
+$("vvSave").onclick = () => run($("vvSave"), saveVoice, "保存しました");
+$("vvTest").onclick = () => run($("vvTest"), async () => {
+  await saveVoice();
+  toast("しゃべっています…");
+  await post("/api/voicevox/test", { text: $("vvTestText").value.trim() });
+}, "しゃべりました");
+$("vvPoints").onclick = () => run($("vvPoints"), async () => {
+  const p = await get("/api/voicevox/points");
+  $("vvPointsText").textContent = "残り " + Number(p.points).toLocaleString() + " ポイント（あと約 " + Math.ceil(p.resetInHours) + " 時間でリセット）";
+});
+
+// ---- Claude Code events ----
+function eventCard(key, e) {
+  return `<div class="event" data-event="${key}">
+    <h3>${EVENT_LABELS[key]}</h3>
+    <label>セリフ</label><input type="text" data-f="text" value="${escapeAttr(e.text)}">
+    <div class="row">
+      <div><label>表情</label><select data-f="emotion">${EMOTIONS.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select></div>
+      <div><label>動き</label><select data-f="motion">${MOTIONS.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select></div>
+      <div><label>吹き出し</label><input type="text" data-f="bubble" value="${escapeAttr(e.bubble)}"></div>
+    </div>
+    <div class="row">
+      <div style="flex:0 0 auto"><label>LED</label><input type="color" data-f="ledColor" value="${toPicker(e.ledColor)}"></div>
+      <div><label>点滅回数（0でLEDなし）</label><input type="range" data-f="ledBlinks" min="0" max="8" value="${e.ledBlinks ?? 3}"></div>
+    </div>
+    <div class="btns"><button class="b" data-test="${key}">試す（保存してから鳴らす）</button></div>
+  </div>`;
+}
+function collectEvents() {
+  const out = {};
+  document.querySelectorAll("[data-event]").forEach((card) => {
+    const e = {};
+    card.querySelectorAll("[data-f]").forEach((el) => {
+      const f = el.dataset.f;
+      e[f] = f === "ledBlinks" ? +el.value : f === "ledColor" ? safeColor(el.value) : el.value;
+    });
+    if (e.ledBlinks === 0) e.ledColor = "";
+    out[card.dataset.event] = e;
+  });
+  return out;
+}
+async function loadEvents() {
+  const events = await get("/api/events");
+  $("events").innerHTML = EVENT_KEYS.map((k) => eventCard(k, events[k] || {})).join("");
+  EVENT_KEYS.forEach((k) => {
+    const card = document.querySelector(`[data-event="${k}"]`), e = events[k] || {};
+    card.querySelector('[data-f="emotion"]').value = e.emotion || "happy";
+    card.querySelector('[data-f="motion"]').value = e.motion || "none";
+  });
+}
+$("saveEvents").onclick = () => run($("saveEvents"), () => post("/api/events", collectEvents()), "保存しました");
+$("events").onclick = (e) => {
+  const key = e.target.dataset.test; if (!key) return;
+  run(e.target, async () => {
+    await post("/api/events", collectEvents());
+    await post("/api/event?name=" + key + "&session=" + encodeURIComponent("テストセッション"));
+  }, "テストしました");
+};
+
+// ---- Gmail / Calendar ----
+function collectNotify() {
+  const notify = {
+    enabled: $("ntEnabled").checked, intervalSec: +$("ntInterval").value, quietHours: $("ntQuiet").checked,
+    quietStart: +$("ntQuietStart").value, quietEnd: +$("ntQuietEnd").value,
+  };
+  const url = $("ntUrl").value.trim();
+  if (url && !/^https:\/\/script\.google\.com\/.+\/exec\?token=[0-9a-fA-F]+$/.test(url)) {
+    throw new Error("中継の URL は、末尾の ?token=…（token は小文字）まで含めて入れてください");
+  }
+  if (url) notify.url = url; else if (clearUrl) notify.url = "";
+  return notify;
+}
+$("ntUrlClear").onclick = () => { clearUrl = true; $("ntUrl").value = ""; $("ntUrl").placeholder = "未設定（保存すると削除）"; };
+$("ntSave").onclick = () => run($("ntSave"), () => saveSettings({ notify: collectNotify() }), "保存しました");
+$("ntCheck").onclick = () => run($("ntCheck"), async () => {
+  await saveSettings({ notify: collectNotify() });
+  if (!settings.notify.urlSet) throw new Error("中継の URL を入れてください");
+  toast("確認しています…");
+  try {
+    const r = await post("/api/notify/check");
+    toast(r.count > 0 ? r.count + "件の通知を読み上げました" : "新しい通知はありません");
+  } finally {
+    loadSettings();
+  }
+});
+
+// ---- device ----
+let deviceTimer = null;
+function saveDevice(patch) {
+  clearTimeout(deviceTimer);
+  deviceTimer = setTimeout(() => run(null, () => saveSettings(patch)), 250);
+}
+$("vol").oninput = () => { $("volVal").textContent = $("vol").value; saveDevice({ volume: +$("vol").value }); };
+$("bri").oninput = () => { $("briVal").textContent = $("bri").value; saveDevice({ brightness: +$("bri").value }); };
+$("tz").onchange = () => saveDevice({ timezone: $("tz").value });
+$("idleLevel").onchange = () => saveDevice({ idleMotionLevel: +$("idleLevel").value });
+document.querySelectorAll("[data-idle]").forEach((c) => c.onchange = () => saveDevice({ [c.dataset.idle]: c.checked }));
+$("servoOn").onclick = () => run($("servoOn"), () => post("/api/servo", { power: true }), "サーボをオンにしました");
+$("servoOff").onclick = () => run($("servoOff"), () => post("/api/servo", { power: false }), "サーボをオフにしました");
+$("calibrate").onclick = () => { if (confirm("今の首の位置を正面として保存しますか？")) run($("calibrate"), () => post("/api/servo", { calibrateZero: true }), "正面を保存しました"); };
+$("resetCal").onclick = () => { if (confirm("正面の調整を工場出荷時に戻しますか？")) run($("resetCal"), () => post("/api/servo", { resetCalibration: true }), "リセットしました"); };
+$("refreshInfo").onclick = () => run($("refreshInfo"), loadSettings);
+$("reboot").onclick = () => { if (confirm("スタックチャンを再起動しますか？")) run($("reboot"), () => post("/api/reboot"), "再起動します"); };
+
+// ---- init ----
+try { const t = localStorage.getItem("tab"); if (t) document.querySelector(`nav button[data-tab="${t}"]`)?.click(); } catch (e) {}
+setAngles(0, 0, false);
+refreshStatus(); setInterval(refreshStatus, 10000);
+loadSettings().then(loadSpeakers);
+loadEvents().catch((e) => toast("通知の設定を読めません: " + e.message));
+</script>
+</body>
+</html>

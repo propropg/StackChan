@@ -8,10 +8,13 @@
 #include <smooth_lvgl.hpp>
 #include <uitk/short_namespace.hpp>
 #include <hal/hal.h>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace setup_workers {
 
@@ -447,6 +450,53 @@ public:
 private:
     std::unique_ptr<PageAccount> _page_account;
     std::unique_ptr<FactoryResetWorker> _worker_reset;
+};
+
+/**
+ * @brief Cloud VOICEVOX on/off, speaker and a speak test. The API key is entered on the web settings page.
+ *
+ */
+class VoicevoxWorker : public WorkerBase {
+public:
+    struct Speaker {
+        int id;
+        std::string name;
+    };
+    // Shared with the test task so it can outlive the worker
+    struct TestState {
+        std::atomic<int> status{0};  // 0 idle, 1 running, 2 ok, 3 failed
+        std::string error;
+    };
+
+    VoicevoxWorker();
+    void update() override;
+
+private:
+    void update_speaker_label();
+    void save();
+    void start_test();
+
+    std::unique_ptr<uitk::lvgl_cpp::Container> _panel;
+    std::unique_ptr<uitk::lvgl_cpp::Container> _panel_enabled;
+    std::unique_ptr<uitk::lvgl_cpp::Container> _panel_speaker;
+    std::unique_ptr<uitk::lvgl_cpp::Container> _panel_key;
+    std::unique_ptr<uitk::lvgl_cpp::Label> _label_enabled_title;
+    std::unique_ptr<uitk::lvgl_cpp::Switch> _switch_enabled;
+    std::unique_ptr<uitk::lvgl_cpp::Label> _label_speaker_title;
+    std::unique_ptr<uitk::lvgl_cpp::Label> _label_speaker_value;
+    std::unique_ptr<uitk::lvgl_cpp::Slider> _slider_speaker;
+    std::unique_ptr<uitk::lvgl_cpp::Label> _label_key_title;
+    std::unique_ptr<uitk::lvgl_cpp::Label> _label_key_info;
+    std::unique_ptr<uitk::lvgl_cpp::Button> _btn_test;
+    std::unique_ptr<uitk::lvgl_cpp::Button> _btn_confirm;
+
+    VoicevoxConfig_t _config;
+    std::vector<Speaker> _speakers;
+    std::shared_ptr<TestState> _test;
+    int _shown_test_status        = -1;
+    int32_t _pending_speaker_index = -1;
+    bool _test_flag                = false;
+    bool _confirm_flag             = false;
 };
 
 }  // namespace setup_workers

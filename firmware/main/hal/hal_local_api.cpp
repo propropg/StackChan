@@ -4,7 +4,7 @@
  * Lets a PC on the same LAN make StackChan speak, move and change expression.
  *
  *   GET  /api/status                               -> {"ok":true,"ip":"..."}
- *   POST /api/say?text=..&emotion=happy            body: WAV (16-bit PCM, mono/stereo, any rate)
+ *   POST /api/say?text=..&emotion=happy[&voice=wav] body: WAV (16-bit PCM, mono/stereo, any rate) or empty
  *   POST /api/motion                               body: {"yaw":deg,"pitch":deg,"speed":100-1000}
  *                                                     or the native {"yawServo":{...},"pitchServo":{...}}
  *   POST /api/emotion?name=happy&ms=3000
@@ -17,6 +17,19 @@
  *   GET  /api/state                                -> current head angles
  *   POST /api/servo                                body: {"power":bool} | {"calibrateZero":true} | {"resetCalibration":true}
  *   POST /api/reboot
+ *
+ *   GET  /                                         -> settings page (VOICEVOX, volume, idle animations)
+ *   POST /api/voicevox/test                        body: {"text":".."} (optional), speaks with the saved settings
+ *   GET  /api/voicevox/speakers                    -> speaker list (proxied, the key stays on the device)
+ *   GET  /api/voicevox/points                      -> {"points":..,"resetInHours":..}
+ *   POST /api/notify/check                         -> polls the Gmail / Calendar relay now, {"ok":true,"count":n}
+ *   POST /api/action                               body: {"text","emotion","motion","bubble","ledColor","ledBlinks"}
+ *   GET  /api/events                               -> Claude Code event templates (stop / notification / sessionEnd)
+ *   POST /api/events                               body: any of the templates above (saved to flash)
+ *   POST /api/event?name=stop&session=..           runs a template; 409 when VOICEVOX is off (the hook falls back)
+ *
+ * /api/say voices: text only -> cloud VOICEVOX. Text + WAV -> VOICEVOX when enabled in settings, the WAV
+ * when VOICEVOX is disabled or fails (add voice=wav to always use the WAV).
  *
  * Handlers only take effect while the AVATAR app is open (its signal handlers are connected there).
  */
@@ -163,38 +176,6 @@ static bool parse_emotion(std::string_view name, avatar::Emotion& emotion)
 }
 
 /* ----------------------------------- WAV ---------------------------------- */
-
-template <typename T>
-struct PsramAllocator {
-    using value_type = T;
-    PsramAllocator() = default;
-    template <typename U>
-    PsramAllocator(const PsramAllocator<U>&)
-    {
-    }
-    T* allocate(size_t n)
-    {
-        auto* p = static_cast<T*>(heap_caps_malloc(n * sizeof(T), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-        if (!p) {
-            throw std::bad_alloc();
-        }
-        return p;
-    }
-    void deallocate(T* p, size_t)
-    {
-        heap_caps_free(p);
-    }
-    template <typename U>
-    bool operator==(const PsramAllocator<U>&) const
-    {
-        return true;
-    }
-    template <typename U>
-    bool operator!=(const PsramAllocator<U>&) const
-    {
-        return false;
-    }
-};
 
 struct WavInfo {
     uint16_t channels      = 0;
@@ -345,6 +326,50 @@ static void speak_pcm(const std::vector<int16_t, PsramAllocator<int16_t>>& pcm, 
 
 }
 
+// Decode a WAV buffer and speak it. Returns nullptr on success or an error message.
+static const char* play_wav(const uint8_t* buf, size_t len, const std::string& text, const std::string& emotion_name)
+{
+    WavInfo wav;
+    if (!parse_wav(buf, len, wav)) {
+        return "expected 16-bit PCM WAV (8k-48kHz, mono/stereo)";
+    }
+    auto codec = Board::GetInstance().GetAudioCodec();
+    if (!codec) {
+        return "audio codec unavailable";
+    }
+    std::vector<int16_t, PsramAllocator<int16_t>> pcm;
+    try {
+        pcm = to_output_pcm(wav, codec->output_sample_rate());
+    } catch (const std::bad_alloc&) {
+        return "out of memory";
+    }
+    speak_pcm(pcm, codec, text, emotion_name);
+    return nullptr;
+}
+
+bool Hal::playWav(const uint8_t* data, size_t size, const std::string& emotion, const std::string& bubble,
+                  std::string& error)
+{
+    if (const char* play_error = play_wav(data, size, bubble, emotion)) {
+        error = play_error;
+        return false;
+    }
+    return true;
+}
+
+bool Hal::speakText(const std::string& text, const std::string& emotion, const std::string& bubble, std::string& error)
+{
+    PsramBytes wav;
+    if (!voicevoxSynthesize(text, wav, error)) {
+        return false;
+    }
+    if (const char* play_error = play_wav(wav.data(), wav.size(), bubble, emotion)) {
+        error = play_error;
+        return false;
+    }
+    return true;
+}
+
 /* -------------------------------- Handlers -------------------------------- */
 
 static esp_err_t handle_status(httpd_req_t* req)
@@ -365,6 +390,19 @@ static esp_err_t handle_say(httpd_req_t* req)
 {
     std::string text         = get_query_param(req, "text");
     std::string emotion_name = get_query_param(req, "emotion");
+    std::string voice        = get_query_param(req, "voice");  // "wav" skips VOICEVOX even when it is enabled
+
+    // Text only: VOICEVOX is the only voice there is
+    if (req->content_len == 0) {
+        if (text.empty()) {
+            return send_error(req, "400 Bad Request", "send text= and/or a WAV body");
+        }
+        std::string error;
+        if (!GetHAL().speakText(text, emotion_name, text, error)) {
+            return send_error(req, "502 Bad Gateway", "voicevox: " + error);
+        }
+        return send_json(req, "200 OK", "{\"ok\":true,\"voice\":\"voicevox\"}");
+    }
 
     size_t len        = 0;
     const char* error = nullptr;
@@ -373,30 +411,31 @@ static esp_err_t handle_say(httpd_req_t* req)
         return send_error(req, "400 Bad Request", error);
     }
 
-    WavInfo wav;
-    if (!parse_wav(body, len, wav)) {
-        heap_caps_free(body);
-        return send_error(req, "400 Bad Request", "expected 16-bit PCM WAV (8k-48kHz, mono/stereo)");
+    // Text + WAV: prefer VOICEVOX when enabled, the WAV is the fallback voice
+    std::string voicevox_error;
+    if (!text.empty() && voice != "wav" && GetHAL().getVoicevoxConfig().enabled) {
+        if (GetHAL().speakText(text, emotion_name, text, voicevox_error)) {
+            heap_caps_free(body);
+            return send_json(req, "200 OK", "{\"ok\":true,\"voice\":\"voicevox\"}");
+        }
+        mclog::tagWarn(_tag, "voicevox failed ({}), falling back to the WAV body", voicevox_error);
     }
 
-    auto codec = Board::GetInstance().GetAudioCodec();
-    if (!codec) {
-        heap_caps_free(body);
-        return send_error(req, "500 Internal Server Error", "audio codec unavailable");
-    }
-
-    std::vector<int16_t, PsramAllocator<int16_t>> pcm;
-    try {
-        pcm = to_output_pcm(wav, codec->output_sample_rate());
-    } catch (const std::bad_alloc&) {
-        heap_caps_free(body);
-        return send_error(req, "500 Internal Server Error", "out of memory");
-    }
+    error = play_wav(body, len, text, emotion_name);
     heap_caps_free(body);
+    if (error) {
+        return send_error(req, "400 Bad Request", error);
+    }
 
-    speak_pcm(pcm, codec, text, emotion_name);
-
-    return send_ok(req);
+    ArduinoJson::JsonDocument doc;
+    doc["ok"]    = true;
+    doc["voice"] = "wav";
+    if (!voicevox_error.empty()) {
+        doc["voicevoxError"] = voicevox_error;
+    }
+    std::string out;
+    ArduinoJson::serializeJson(doc, out);
+    return send_json(req, "200 OK", out);
 }
 
 static esp_err_t handle_motion(httpd_req_t* req)
@@ -586,6 +625,33 @@ static esp_err_t handle_get_settings(httpd_req_t* req)
     doc["headPet"]         = idle.headPet;
     doc["imu"]             = idle.imu;
 
+    // The API key itself never leaves the device; only whether it is set and its last characters
+    const auto voicevox       = GetHAL().getVoicevoxConfig();
+    auto vv                   = doc["voicevox"].to<ArduinoJson::JsonObject>();
+    vv["enabled"]             = voicevox.enabled;
+    vv["apiKeySet"]           = !voicevox.apiKey.empty();
+    vv["apiKeyHint"]          = voicevox.apiKey.size() > 4 ? voicevox.apiKey.substr(voicevox.apiKey.size() - 4) : "";
+    vv["speaker"]             = voicevox.speaker;
+    vv["speed"]               = voicevox.speed;
+    vv["pitch"]               = voicevox.pitch;
+    vv["intonation"]          = voicevox.intonation;
+    vv["greetingText"]        = voicevox.greetingText;
+
+    // The relay url carries the access token, so only its tail is shown
+    const auto notify    = GetHAL().getNotifyConfig();
+    const auto nstatus   = GetHAL().getNotifyStatus();
+    auto nt              = doc["notify"].to<ArduinoJson::JsonObject>();
+    nt["enabled"]        = notify.enabled;
+    nt["urlSet"]         = !notify.url.empty();
+    nt["urlHint"]        = notify.url.size() > 6 ? notify.url.substr(notify.url.size() - 6) : "";
+    nt["intervalSec"]    = notify.intervalSec;
+    nt["quietHours"]     = notify.quietHours;
+    nt["quietStart"]     = notify.quietStart;
+    nt["quietEnd"]       = notify.quietEnd;
+    nt["lastCheckAgoSec"] = nstatus.lastCheckUs == 0 ? -1 : static_cast<int>((esp_timer_get_time() - nstatus.lastCheckUs) / 1000000);
+    nt["lastCount"]      = nstatus.lastCount;
+    nt["lastError"]      = nstatus.lastError;
+
     auto info         = doc["device"].to<ArduinoJson::JsonObject>();
     info["ip"]        = GetHAL().getLocalIp();
     info["firmware"]  = esp_app_get_description()->version;
@@ -633,6 +699,35 @@ static esp_err_t handle_post_settings(httpd_req_t* req)
     }
     if (doc["timezone"].is<const char*>()) {
         GetHAL().setTimezone(doc["timezone"].as<std::string>());
+    }
+
+    if (auto vv = doc["voicevox"]; vv.is<ArduinoJson::JsonObject>()) {
+        auto voicevox = GetHAL().getVoicevoxConfig();
+        if (vv["enabled"].is<bool>()) voicevox.enabled = vv["enabled"].as<bool>();
+        if (vv["apiKey"].is<const char*>()) voicevox.apiKey = vv["apiKey"].as<std::string>();  // "" clears it
+        if (vv["speaker"].is<int>()) voicevox.speaker = vv["speaker"].as<int>();
+        if (vv["speed"].is<float>()) voicevox.speed = vv["speed"].as<float>();
+        if (vv["pitch"].is<float>()) voicevox.pitch = vv["pitch"].as<float>();
+        if (vv["intonation"].is<float>()) voicevox.intonation = vv["intonation"].as<float>();
+        if (vv["greetingText"].is<const char*>()) voicevox.greetingText = vv["greetingText"].as<std::string>();
+        GetHAL().setVoicevoxConfig(voicevox);
+    }
+
+    if (auto nt = doc["notify"]; nt.is<ArduinoJson::JsonObject>()) {
+        if (nt["url"].is<const char*>()) {
+            std::string url = nt["url"].as<std::string>();
+            if (!url.empty() && url.find("/exec?token=") == std::string::npos) {
+                return send_error(req, "400 Bad Request", "relay url must end with /exec?token=<token>");
+            }
+        }
+        auto notify = GetHAL().getNotifyConfig();
+        if (nt["enabled"].is<bool>()) notify.enabled = nt["enabled"].as<bool>();
+        if (nt["url"].is<const char*>()) notify.url = nt["url"].as<std::string>();  // "" clears it
+        if (nt["intervalSec"].is<int>()) notify.intervalSec = nt["intervalSec"].as<int>();
+        if (nt["quietHours"].is<bool>()) notify.quietHours = nt["quietHours"].as<bool>();
+        if (nt["quietStart"].is<int>()) notify.quietStart = nt["quietStart"].as<int>();
+        if (nt["quietEnd"].is<int>()) notify.quietEnd = nt["quietEnd"].as<int>();
+        GetHAL().setNotifyConfig(notify);
     }
 
     auto idle         = load_idle_settings();
@@ -704,6 +799,106 @@ static esp_err_t handle_servo(httpd_req_t* req)
     return send_ok(req);
 }
 
+/* -------------------------------- VOICEVOX -------------------------------- */
+
+// Speak a test sentence with the saved settings: {"text":"..."} (optional)
+static esp_err_t handle_voicevox_test(httpd_req_t* req)
+{
+    std::string text = "こんにちは、スタックチャンだよ。";
+    if (req->content_len > 0) {
+        ArduinoJson::JsonDocument doc;
+        if (!read_json_body(req, doc)) {
+            return ESP_OK;
+        }
+        if (doc["text"].is<const char*>() && !doc["text"].as<std::string>().empty()) {
+            text = doc["text"].as<std::string>();
+        }
+    }
+    std::string error;
+    if (!GetHAL().speakText(text, "happy", text, error)) {
+        return send_error(req, "502 Bad Gateway", error);
+    }
+    return send_ok(req);
+}
+
+// Proxy the speaker list / remaining points so the browser never needs the API key
+static esp_err_t handle_voicevox_json(httpd_req_t* req)
+{
+    std::string out;
+    std::string error;
+    if (!GetHAL().voicevoxFetchJson(static_cast<const char*>(req->user_ctx), out, error)) {
+        return send_error(req, "502 Bad Gateway", error);
+    }
+    return send_json(req, "200 OK", out);
+}
+
+/* ---------------------------- Actions / events ---------------------------- */
+
+// {"text","emotion","motion","bubble","ledColor","ledBlinks"}: speak with VOICEVOX + motion + LEDs
+static esp_err_t handle_action(httpd_req_t* req)
+{
+    ArduinoJson::JsonDocument doc;
+    if (!read_json_body(req, doc)) {
+        return ESP_OK;
+    }
+    std::string error;
+    if (!GetHAL().runAction(Action_t::fromJson(doc.as<ArduinoJson::JsonVariantConst>()), error)) {
+        return send_error(req, "502 Bad Gateway", error);
+    }
+    return send_ok(req);
+}
+
+static esp_err_t handle_get_events(httpd_req_t* req)
+{
+    return send_json(req, "200 OK", GetHAL().getEventsJson());
+}
+
+static esp_err_t handle_post_events(httpd_req_t* req)
+{
+    ArduinoJson::JsonDocument doc;
+    if (!read_json_body(req, doc)) {
+        return ESP_OK;
+    }
+    GetHAL().setEventsJson(doc.as<ArduinoJson::JsonVariantConst>());
+    return handle_get_events(req);
+}
+
+// ?name=stop|notification|sessionEnd&session=<session title>
+static esp_err_t handle_event(httpd_req_t* req)
+{
+    std::string error;
+    if (!GetHAL().runEvent(get_query_param(req, "name"), get_query_param(req, "session"), error)) {
+        const char* status = error == "unknown event" ? "400 Bad Request" : error == "voicevox disabled" ? "409 Conflict" : "502 Bad Gateway";
+        return send_error(req, status, error);
+    }
+    return send_ok(req);
+}
+
+/* ------------------------------ Notifications ----------------------------- */
+
+// Poll the Gmail / Calendar relay now and speak what it returns
+static esp_err_t handle_notify_check(httpd_req_t* req)
+{
+    int count = 0;
+    std::string error;
+    if (!GetHAL().checkNotificationsNow(count, error)) {
+        return send_error(req, "502 Bad Gateway", error);
+    }
+    return send_json(req, "200 OK", "{\"ok\":true,\"count\":" + std::to_string(count) + "}");
+}
+
+/* ------------------------------ Settings page ----------------------------- */
+
+extern const uint8_t _settings_html_start[] asm("_binary_settings_html_start");
+extern const uint8_t _settings_html_end[] asm("_binary_settings_html_end");
+
+static esp_err_t handle_settings_page(httpd_req_t* req)
+{
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_send(req, reinterpret_cast<const char*>(_settings_html_start),
+                           _settings_html_end - _settings_html_start);
+}
+
 static void reboot_task(void*)
 {
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -758,10 +953,39 @@ static void play_embedded_wav(const uint8_t* start, const uint8_t* end, const ch
     }
 }
 
+// Greeting synthesized with VOICEVOX while the jingle plays, so the cloud round trip is mostly hidden
+struct GreetingJob {
+    std::string text;
+    PsramBytes wav;
+    std::string error;
+    bool ok                 = false;
+    SemaphoreHandle_t done  = nullptr;
+};
+
+static void greeting_synth_task(void* arg)
+{
+    auto* job = static_cast<GreetingJob*>(arg);
+    job->ok   = GetHAL().voicevoxSynthesize(job->text, job->wav, job->error);
+    xSemaphoreGive(job->done);
+    vTaskDelete(nullptr);
+}
+
 static void boot_greeting_task(void*)
 {
     // Let the AVATAR app finish opening and connect its signal handlers
     vTaskDelay(pdMS_TO_TICKS(800));
+
+    // Kick off the VOICEVOX greeting first; the embedded greeting is the fallback
+    std::unique_ptr<GreetingJob> job;
+    if (const auto config = GetHAL().getVoicevoxConfig(); config.enabled && !config.greetingText.empty()) {
+        job       = std::make_unique<GreetingJob>();
+        job->text = config.greetingText;
+        job->done = xSemaphoreCreateBinary();
+        if (xTaskCreate(greeting_synth_task, "greeting_tts", 8192, job.get(), 3, nullptr) != pdPASS) {
+            vSemaphoreDelete(job->done);
+            job.reset();
+        }
+    }
 
     {
         LvglLockGuard lock;
@@ -774,8 +998,27 @@ static void boot_greeting_task(void*)
     if (auto codec = Board::GetInstance().GetAudioCodec(); codec && codec->output_enabled()) {
         // Pause after the jingle so the greeting does not run into it
         write_silence(codec, 500);
+        if (job) {
+            // The VOICEVOX greeting may still be on its way; do not leave the amp open meanwhile
+            codec->EnableOutput(false);
+        }
     }
-    play_embedded_wav(_boot_greeting_wav_start, _boot_greeting_wav_end, "happy", true, false);
+    bool greeted = false;
+    if (job) {
+        // The synth task owns the job until it signals; never abandon it, the 15s http timeout bounds the wait
+        xSemaphoreTake(job->done, portMAX_DELAY);
+        vSemaphoreDelete(job->done);
+        if (job->ok) {
+            // Empty text keeps the IP address bubble that the AVATAR app shows on open
+            greeted = play_wav(job->wav.data(), job->wav.size(), "", "happy") == nullptr;
+        } else {
+            mclog::tagWarn(_tag, "voicevox greeting failed ({}), using the built-in voice", job->error);
+        }
+        job.reset();
+    }
+    if (!greeted) {
+        play_embedded_wav(_boot_greeting_wav_start, _boot_greeting_wav_end, "happy", true, false);
+    }
 
     {
         LvglLockGuard lock;
@@ -834,8 +1077,8 @@ void Hal::startLocalApiService(std::function<void(std::string_view)> onStartLog)
     }
 
     httpd_config_t config   = HTTPD_DEFAULT_CONFIG();
-    config.stack_size       = 8192;
-    config.max_uri_handlers = 16;
+    config.stack_size       = 12288;  // TLS to the VOICEVOX cloud runs inside handlers
+    config.max_uri_handlers = 24;
     config.recv_wait_timeout = 10;
     config.send_wait_timeout = 10;
 
@@ -858,6 +1101,15 @@ void Hal::startLocalApiService(std::function<void(std::string_view)> onStartLog)
         {.uri = "/api/state", .method = HTTP_GET, .handler = handle_state, .user_ctx = nullptr},
         {.uri = "/api/servo", .method = HTTP_POST, .handler = handle_servo, .user_ctx = nullptr},
         {.uri = "/api/reboot", .method = HTTP_POST, .handler = handle_reboot, .user_ctx = nullptr},
+        {.uri = "/api/voicevox/test", .method = HTTP_POST, .handler = handle_voicevox_test, .user_ctx = nullptr},
+        {.uri = "/api/voicevox/speakers", .method = HTTP_GET, .handler = handle_voicevox_json, .user_ctx = (void*)"speakers"},
+        {.uri = "/api/voicevox/points", .method = HTTP_GET, .handler = handle_voicevox_json, .user_ctx = (void*)"points"},
+        {.uri = "/api/notify/check", .method = HTTP_POST, .handler = handle_notify_check, .user_ctx = nullptr},
+        {.uri = "/api/action", .method = HTTP_POST, .handler = handle_action, .user_ctx = nullptr},
+        {.uri = "/api/events", .method = HTTP_GET, .handler = handle_get_events, .user_ctx = nullptr},
+        {.uri = "/api/events", .method = HTTP_POST, .handler = handle_post_events, .user_ctx = nullptr},
+        {.uri = "/api/event", .method = HTTP_POST, .handler = handle_event, .user_ctx = nullptr},
+        {.uri = "/", .method = HTTP_GET, .handler = handle_settings_page, .user_ctx = nullptr},
     };
     for (const auto& uri : uris) {
         httpd_register_uri_handler(_server, &uri);

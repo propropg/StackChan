@@ -290,7 +290,7 @@ if(CONFIG_IDF_TARGET_ESP32S3)
 endif()
 
 idf_component_register(SRCS ${SOURCES}
-                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS} assets/voice/boot_jingle.wav assets/voice/boot_greeting.wav
+                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS} assets/voice/boot_jingle.wav assets/voice/boot_greeting.wav assets/web/settings.html
                     INCLUDE_DIRS ${INCLUDE_DIRS}
                     WHOLE_ARCHIVE
                     PRIV_REQUIRES
@@ -298,6 +298,8 @@ idf_component_register(SRCS ${SOURCES}
                         esp_psram
                         esp_netif
                         esp_http_server
+                        esp_http_client
+                        mbedtls
                         esp_driver_gpio
                         esp_driver_uart
                         esp_driver_spi

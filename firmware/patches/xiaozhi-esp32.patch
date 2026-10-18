@@ -246,13 +246,55 @@ index 3692e0c..7bfbc5c 100644
      // Strategy instance
      std::unique_ptr<AssetStrategy> strategy_;
 diff --git a/main/boards/common/i2c_device.cc b/main/boards/common/i2c_device.cc
-index 835997d..ea50d51 100644
+index 835997d..10855da 100644
 --- a/main/boards/common/i2c_device.cc
 +++ b/main/boards/common/i2c_device.cc
-@@ -32,4 +32,8 @@ uint8_t I2cDevice::ReadReg(uint8_t reg) {
+@@ -1,6 +1,7 @@
+ #include "i2c_device.h"
+ 
+ #include <esp_log.h>
++#include <cstring>
+ 
+ #define TAG "I2cDevice"
+ 
+@@ -19,17 +20,38 @@ I2cDevice::I2cDevice(i2c_master_bus_handle_t i2c_bus, uint8_t addr) {
+     assert(i2c_device_ != NULL);
+ }
+ 
++// The bus is shared with the touch panel, IMU and PMIC, and a read occasionally times out. Retry a few
++// times and log instead of aborting, so a transient glitch no longer reboots the device.
++static constexpr int kI2cRetries = 3;
++
+ void I2cDevice::WriteReg(uint8_t reg, uint8_t value) {
+     uint8_t buffer[2] = {reg, value};
+-    ESP_ERROR_CHECK(i2c_master_transmit(i2c_device_, buffer, 2, 100));
++    esp_err_t err = ESP_FAIL;
++    for (int i = 0; i < kI2cRetries && err != ESP_OK; i++) {
++        err = i2c_master_transmit(i2c_device_, buffer, 2, 100);
++    }
++    if (err != ESP_OK) {
++        ESP_LOGW(TAG, "write reg 0x%02X failed: %s", reg, esp_err_to_name(err));
++    }
+ }
+ 
+ uint8_t I2cDevice::ReadReg(uint8_t reg) {
+-    uint8_t buffer[1];
+-    ESP_ERROR_CHECK(i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, 1, 100));
++    uint8_t buffer[1] = {0};
++    ReadRegs(reg, buffer, 1);
+     return buffer[0];
+ }
  
  void I2cDevice::ReadRegs(uint8_t reg, uint8_t* buffer, size_t length) {
-     ESP_ERROR_CHECK(i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, length, 100));
+-    ESP_ERROR_CHECK(i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, length, 100));
++    esp_err_t err = ESP_FAIL;
++    for (int i = 0; i < kI2cRetries && err != ESP_OK; i++) {
++        err = i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, length, 100);
++    }
++    if (err != ESP_OK) {
++        ESP_LOGW(TAG, "read reg 0x%02X failed: %s", reg, esp_err_to_name(err));
++        memset(buffer, 0, length);
++    }
 +}
 +
 +esp_err_t I2cDevice::TryReadRegs(uint8_t reg, uint8_t* buffer, size_t length, int timeout_ms) {

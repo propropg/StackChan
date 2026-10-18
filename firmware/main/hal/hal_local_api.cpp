@@ -372,11 +372,36 @@ bool Hal::speakText(const std::string& text, const std::string& emotion, const s
 
 /* -------------------------------- Handlers -------------------------------- */
 
+static const char* reset_reason_name(esp_reset_reason_t reason)
+{
+    switch (reason) {
+        case ESP_RST_POWERON:   return "poweron";
+        case ESP_RST_EXT:       return "external";
+        case ESP_RST_SW:        return "software";
+        case ESP_RST_PANIC:     return "panic";
+        case ESP_RST_INT_WDT:   return "int_wdt";
+        case ESP_RST_TASK_WDT:  return "task_wdt";
+        case ESP_RST_WDT:       return "other_wdt";
+        case ESP_RST_DEEPSLEEP: return "deepsleep";
+        case ESP_RST_BROWNOUT:  return "brownout";
+        case ESP_RST_SDIO:      return "sdio";
+        case ESP_RST_USB:       return "usb";
+        case ESP_RST_JTAG:      return "jtag";
+        default:                return "unknown";
+    }
+}
+
 static esp_err_t handle_status(httpd_req_t* req)
 {
     ArduinoJson::JsonDocument doc;
-    doc["ok"] = true;
-    doc["ip"] = GetHAL().getLocalIp();
+    doc["ok"]                = true;
+    doc["ip"]                = GetHAL().getLocalIp();
+    doc["uptime_s"]          = esp_timer_get_time() / 1000000;
+    doc["reset_reason"]      = reset_reason_name(esp_reset_reason());
+    doc["heap_internal"]     = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    doc["heap_internal_min"] = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    doc["heap_internal_max"] = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    doc["heap_psram"]        = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     {
         LvglLockGuard lock;
         doc["avatar"] = GetStackChan().hasAvatar();

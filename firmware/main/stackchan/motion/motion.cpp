@@ -135,3 +135,31 @@ bool Motion::isModifyLocked()
 {
     return _is_modify_locked;
 }
+
+void Motion::setFront(int yawAngle, int pitchAngle)
+{
+    _front     = uitk::Vector2i(yawAngle, pitchAngle);
+    _has_front = true;
+}
+
+void Motion::clearFront()
+{
+    _front     = uitk::Vector2i(0, 0);
+    _has_front = false;
+}
+
+bool Motion::hasFront()
+{
+    return _has_front;
+}
+
+uitk::Vector2i Motion::getFront()
+{
+    return _has_front ? _front : uitk::Vector2i(0, 0);
+}
+
+void Motion::goFront(int speed)
+{
+    auto front = getFront();
+    moveWithSpeed(front.x, front.y, speed);
+}

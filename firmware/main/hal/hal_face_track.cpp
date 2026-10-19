@@ -5,8 +5,8 @@
  * toward it. Faces are found with the ESP-DL MSR+MNP detector (the models of espressif/human_face_detect,
  * stored in the assets partition as face_msr_s8_v1.espdl / face_mnp_s8_v1.espdl). The camera sits in the
  * head, so each step turns by the face's offset from the image centre and the next frame shows what is left.
- * When no face is seen the head is left alone, except that each session first looks where the face was last
- * time and comes back if it is not there.
+ * Until a face is found, each session looks where the face was last time, then a little up and to the sides,
+ * and comes back to where it started if nobody is there.
  */
 #include "hal.h"
 #include "board/hal_bridge.h"
@@ -14,6 +14,7 @@
 #include <stackchan/stackchan.h>
 #include <assets.h>
 #include <mooncake_log.h>
+#include <settings.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -44,11 +45,15 @@ static constexpr float _deadband_deg = 3.0f;
 static constexpr int _move_speed     = 300;
 // Keep the head in a natural range (0.1 degree)
 static constexpr int _yaw_limit = 700;
-static constexpr int _pitch_max = 600;
+static constexpr int _pitch_max = 850;  // StackChan often sits well below the user's face
 
 static constexpr uint32_t _settle_ms   = 120;  // let the head stop shaking before grabbing a frame
 static constexpr uint32_t _interval_ms = 100;  // pause between detections so the audio task keeps up
-static constexpr int _recall_frames    = 4;    // frames to look for the user where they were last time
+static constexpr int _search_frames    = 2;    // frames to look at each search position before the next
+
+// MSR only proposes candidates; MNP (threshold 0.5) decides. The GC0308's flat, low-contrast frames score a
+// clearly visible face around 0.3 in MSR, so its stock 0.5 threshold found nothing.
+static constexpr float _msr_score_thr = 0.25f;
 
 /* -------------------------------- Detector -------------------------------- */
 
@@ -64,7 +69,7 @@ public:
         m_model->minimize();
         m_image_preprocessor = new dl::image::ImagePreprocessor(m_model, {0, 0, 0}, {1, 1, 1}, true);
         m_postprocessor      = new dl::detect::MSRPostprocessor(
-            m_model, m_image_preprocessor, 0.5f, 0.5f, 10,
+            m_model, m_image_preprocessor, _msr_score_thr, 0.5f, 10,
             {{8, 8, 9, 9, {{16, 16}, {32, 32}}}, {16, 16, 9, 9, {{64, 64}, {128, 128}}}});
     }
 };
@@ -283,9 +288,57 @@ static bool detect(FaceDetector& detector, bool& found, Face& face)
     return true;
 }
 
-// Head angles (0.1 degree) that last faced the user; the next session looks there first
-static bool _has_last_face = false;
-static int _last_face_yaw = 0, _last_face_pitch = 0;
+/* -------------------------- Conversation front --------------------------- */
+
+// The head angles that last faced the user become the conversation front (Motion::setFront): idle motion,
+// actions and speech centre on it, and the next tracking session looks there first. Saved to flash at the
+// end of a session so it survives a reboot.
+static const char* _settings_ns = "face";
+
+void Hal::loadFaceFront()
+{
+    Settings settings(_settings_ns, false);
+    auto& motion = GetStackChan().motion();
+    if (settings.GetBool("has_front", false)) {
+        motion.setFront(settings.GetInt("front_yaw", 0), settings.GetInt("front_pitch", 0));
+    } else {
+        motion.clearFront();
+    }
+}
+
+void Hal::resetFaceFront()
+{
+    {
+        LvglLockGuard lock;
+        GetStackChan().motion().clearFront();
+    }
+    Settings settings(_settings_ns, true);
+    settings.SetBool("has_front", false);
+    mclog::tagInfo(_tag, "conversation front cleared");
+}
+
+// Writing flash needs a task whose stack is in internal RAM, and the tracker's stack is in PSRAM, so the save
+// runs in a short-lived task of its own
+static void save_front(int yaw, int pitch)
+{
+    static int saved[2];
+    saved[0] = yaw;
+    saved[1] = pitch;
+    auto task = [](void* arg) {
+        auto angles = static_cast<int*>(arg);
+        {
+            Settings settings(_settings_ns, true);
+            settings.SetBool("has_front", true);
+            settings.SetInt("front_yaw", angles[0]);
+            settings.SetInt("front_pitch", angles[1]);
+        }
+        mclog::tagInfo(_tag, "conversation front saved ({}, {})", angles[0] / 10, angles[1] / 10);
+        vTaskDelete(nullptr);
+    };
+    if (xTaskCreate(task, "face_front", 4096, saved, 2, nullptr) != pdPASS) {
+        mclog::tagError(_tag, "failed to start the save task");
+    }
+}
 
 // Move the head unless someone else (IMU pick-up) holds it. Our modify lock keeps idle motion / head pet away.
 static bool move_head(int yaw, int pitch, bool& holding_motion)
@@ -307,20 +360,34 @@ static void track(FaceDetector& detector)
     set_status([](FaceTrackStatus_t& s) { s.active = true; });
     bool holding_motion = false;
 
-    // Look where the user was last time first; if they are not there after a few frames, go back and watch from
-    // where the head started
+    // Until a face is found, look in turn: where the user was last time, straight on from where the head is,
+    // then a little up and to the sides (StackChan usually sits below the user's face). With nobody found the
+    // head goes back to where it started and just watches.
     int start_yaw = 0, start_pitch = 0;
+    bool has_front = false;
+    uitk::Vector2i front;
     {
         LvglLockGuard lock;
         auto& motion = GetStackChan().motion();
         start_yaw    = motion.getCurrentYawAngle();
         start_pitch  = motion.getCurrentPitchAngle();
+        has_front    = motion.hasFront();
+        front        = motion.getFront();
     }
-    int recall_tries = 0;
-    if (_has_last_face && move_head(_last_face_yaw, _last_face_pitch, holding_motion)) {
-        recall_tries = _recall_frames;
-        mclog::tagInfo(_tag, "looking where the face was last time ({}, {})", _last_face_yaw / 10, _last_face_pitch / 10);
+    std::vector<uitk::Vector2i> search;
+    if (has_front) {
+        search.emplace_back(front.x, front.y);
     }
+    search.emplace_back(start_yaw, start_pitch);
+    for (auto [dy, dp] : {std::pair{0, 150}, {0, 300}, {-250, 200}, {250, 200}}) {
+        search.emplace_back(std::clamp(start_yaw + dy, -_yaw_limit, _yaw_limit),
+                            std::clamp(start_pitch + dp, 0, _pitch_max));
+    }
+    size_t search_index = 0;
+    int search_frames   = _search_frames;
+    move_head(search[0].x, search[0].y, holding_motion);
+    bool seen = false;
+    int seen_yaw = 0, seen_pitch = 0;
 
     while (wanted()) {
         bool moving = false;
@@ -345,7 +412,7 @@ static void track(FaceDetector& detector)
             continue;
         }
         if (found) {
-            recall_tries = 0;
+            search.clear();
             // Image right is StackChan's right (positive yaw); image up is positive pitch
             const float yaw_deg   = face.x * _hfov_deg * 0.5f * _gain;
             const float pitch_deg = -face.y * _vfov_deg * 0.5f * _gain;
@@ -355,16 +422,23 @@ static void track(FaceDetector& detector)
                 auto& motion = GetStackChan().motion();
                 yaw          = std::clamp(motion.getCurrentYawAngle() + static_cast<int>(yaw_deg * 10), -_yaw_limit, _yaw_limit);
                 pitch        = std::clamp(motion.getCurrentPitchAngle() + static_cast<int>(pitch_deg * 10), 0, _pitch_max);
+                motion.setFront(yaw, pitch);
             }
-            _has_last_face   = true;
-            _last_face_yaw   = yaw;
-            _last_face_pitch = pitch;
+            seen       = true;
+            seen_yaw   = yaw;
+            seen_pitch = pitch;
             if (std::fabs(yaw_deg) > _deadband_deg || std::fabs(pitch_deg) > _deadband_deg) {
                 move_head(yaw, pitch, holding_motion);
             }
-        } else if (recall_tries > 0 && --recall_tries == 0) {
-            mclog::tagInfo(_tag, "no face where it was last time, going back");
-            move_head(start_yaw, start_pitch, holding_motion);
+        } else if (!search.empty() && --search_frames == 0) {
+            if (++search_index < search.size()) {
+                search_frames = _search_frames;
+                move_head(search[search_index].x, search[search_index].y, holding_motion);
+            } else {
+                mclog::tagInfo(_tag, "no face found nearby, going back");
+                search.clear();
+                move_head(start_yaw, start_pitch, holding_motion);
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(_interval_ms));
     }
@@ -372,6 +446,10 @@ static void track(FaceDetector& detector)
     if (holding_motion) {
         LvglLockGuard lock;
         GetStackChan().motion().setModifyLock(false);
+    }
+    // Once per session, and only when it moved noticeably, to spare the flash
+    if (seen && (!has_front || std::abs(seen_yaw - front.x) > 30 || std::abs(seen_pitch - front.y) > 30)) {
+        save_front(seen_yaw, seen_pitch);
     }
     set_status([](FaceTrackStatus_t& s) { s.active = false; });
     mclog::tagInfo(_tag, "tracking stopped");
@@ -440,8 +518,17 @@ void Hal::trackFaceFor(uint32_t ms)
 
 FaceTrackStatus_t Hal::getFaceTrackStatus()
 {
-    std::lock_guard<std::mutex> lock(_status_mutex);
-    return _status;
+    FaceTrackStatus_t out;
+    {
+        std::lock_guard<std::mutex> lock(_status_mutex);
+        out = _status;
+    }
+    LvglLockGuard lock;
+    auto& motion = GetStackChan().motion();
+    out.hasFront = motion.hasFront();
+    out.frontYaw = motion.getFront().x;
+    out.frontPitch = motion.getFront().y;
+    return out;
 }
 
 bool Hal::getFaceCameraBmp(PsramBytes& bmp, std::string& error)

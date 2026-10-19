@@ -165,6 +165,8 @@ struct FaceTrackStatus_t {
     int faces        = 0;  // faces in the last frame
     int64_t lastSeenUs = 0;  // esp_timer time a face was last seen, 0 = never
     float lastX = 0.0f, lastY = 0.0f;  // where it was, -1..1 from the image centre (x right, y down)
+    bool hasFront = false;  // conversation front (head angles facing the user, 0.1 degree)
+    int frontYaw = 0, frontPitch = 0;
 };
 
 struct NotifyStatus_t {
@@ -364,6 +366,10 @@ public:
     FaceTrackStatus_t getFaceTrackStatus();
     // The camera frame exactly as the face detector sees it (24-bit BMP)
     bool getFaceCameraBmp(PsramBytes& bmp, std::string& error);
+    // The conversation front (Motion::setFront) is where a face was last seen; it is saved to flash.
+    // Load it with the LVGL lock held (AVATAR app start). Reset forgets it (head centres on 0 again).
+    void loadFaceFront();
+    void resetFaceFront();
 
     /* -------------------------------- VOICEVOX -------------------------------- */
     // Cloud VOICEVOX (WEB版VOICEVOX API by su-shiki), configured from the web settings page or SETUP

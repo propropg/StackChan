@@ -246,12 +246,13 @@
     <div class="toggle" style="margin-top:8px"><span>チャットの本文も読み上げる</span><input type="checkbox" id="ntChatBody"></div>
     <p class="hint">オフのときは「〇〇さんからチャットが届いたよ」とだけ話します。吹き出しには本文も出ます。</p>
     <div class="toggle" style="margin-top:8px"><span>読み上げるとき顔を探してこちらを向く</span><input type="checkbox" id="ntLookFace"></div>
-    <p class="hint">カメラで顔が見つかったときだけ首を動かします。見つからなければそのまま話します。</p>
+    <p class="hint">カメラで顔が見つかったときだけ首を動かします。見つからなければそのまま話します。一度見つけた顔の向きを「会話の正面」として覚え、ふだんの首の動きやしゃべるときはそちらを向きます。置き場所を変えたら「正面を忘れる」を押してください。</p>
 
     <div class="btns">
       <button class="b primary" id="ntSave">保存</button>
       <button class="b" id="ntCheck">保存して今すぐ確認</button>
       <button class="b" id="ntFaceTest">顔を探すテスト（15秒）</button>
+      <button class="b" id="ntFrontReset">正面を忘れる</button>
     </div>
     <p class="hint" id="ntStatus"></p>
     <p class="hint" id="ntFaceStatus"></p>
@@ -675,11 +676,13 @@ $("ntCheck").onclick = () => run($("ntCheck"), async () => {
 function faceStatusText(f) {
   if (!f) return "";
   if (f.error) return "顔検出: " + f.error;
-  if (!f.modelLoaded) return "顔検出: まだ使っていません";
+  const front = f.hasFront ? `会話の正面: 左右 ${f.frontYaw}° / 上下 ${f.frontPitch}°` : "会話の正面: まだ覚えていません";
+  if (!f.modelLoaded) return "顔検出: まだ使っていません。" + front;
   const seen = f.lastSeenAgoMs < 0 ? "まだ顔を見ていません"
     : `最後に顔を見たのは ${Math.round(f.lastSeenAgoMs / 1000)} 秒前（横 ${f.lastX.toFixed(2)} / 縦 ${f.lastY.toFixed(2)}）`;
-  return `顔検出: ${f.active ? "動作中" : "待機中"}、1回 ${f.inferMs} ms、直近の画像の顔 ${f.faces} 個、${seen}`;
+  return `顔検出: ${f.active ? "動作中" : "待機中"}、1回 ${f.inferMs} ms、直近の画像の顔 ${f.faces} 個、${seen}。${front}`;
 }
+$("ntFrontReset").onclick = () => run($("ntFrontReset"), () => saveSettings({ face: { resetFront: true } }), "正面を忘れました");
 $("ntFaceTest").onclick = () => run($("ntFaceTest"), async () => {
   await post("/api/face/test?seconds=15");
   toast("15秒間、顔を探します。カメラの前に顔を出してください");

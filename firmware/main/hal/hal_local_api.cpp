@@ -290,6 +290,11 @@ static void speak_pcm(const std::vector<int16_t, PsramAllocator<int16_t>>& pcm, 
         LvglLockGuard lock;
         auto& stackchan = GetStackChan();
         if (stackchan.hasAvatar()) {
+            // Talk toward the user. Skipped while the face tracker / IMU hold the head or an action motion plays.
+            auto& motion = stackchan.motion();
+            if (motion.hasFront() && !motion.isModifyLocked() && !motion.isMoving()) {
+                motion.goFront(250);
+            }
             if (animate_mouth) {
                 stackchan.addModifier(std::make_unique<SpeakingModifier>(duration_ms));
             }
@@ -616,6 +621,9 @@ void Hal::applyIdleModifiers()
     }
     _idle_modifier_ids.clear();
 
+    // Idle motion centres on the conversation front
+    loadFaceFront();
+
     const auto idle = load_idle_settings();
     auto add        = [&](std::unique_ptr<Modifier> modifier) {
         _idle_modifier_ids.push_back(stackchan.addModifier(std::move(modifier)));
@@ -762,6 +770,9 @@ static esp_err_t handle_post_settings(httpd_req_t* req)
         if (nt["chatReadContent"].is<bool>()) notify.chatReadContent = nt["chatReadContent"].as<bool>();
         if (nt["lookAtFace"].is<bool>()) notify.lookAtFace = nt["lookAtFace"].as<bool>();
         GetHAL().setNotifyConfig(notify);
+    }
+    if (doc["face"]["resetFront"].as<bool>()) {
+        GetHAL().resetFaceFront();
     }
 
     auto idle         = load_idle_settings();
@@ -934,6 +945,9 @@ static void face_status_to_json(ArduinoJson::JsonObject json)
     json["lastSeenAgoMs"] = face.lastSeenUs == 0 ? -1 : static_cast<int>((esp_timer_get_time() - face.lastSeenUs) / 1000);
     json["lastX"]       = face.lastX;
     json["lastY"]       = face.lastY;
+    json["hasFront"]    = face.hasFront;
+    json["frontYaw"]    = face.frontYaw / 10;  // degrees
+    json["frontPitch"]  = face.frontPitch / 10;
 }
 
 // Track faces for ?seconds= (default 15, 0 stops) so the camera direction can be checked without a notification

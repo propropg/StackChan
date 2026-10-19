@@ -44,8 +44,10 @@ static const std::map<std::string, std::vector<MotionStep>>& motions()
 }
 
 // Merge the motion and the LED blink into one keyframe timeline of fixed slices (every dance keyframe sets
-// both servos and LEDs). The LEDs blink `blinks` times, then stay lit until the timeline ends.
-static std::string build_timeline(const std::string& motion, const std::string& color, int blinks, uint32_t& duration_ms)
+// both servos and LEDs). The LEDs blink `blinks` times, then stay lit until the timeline ends. The motion is
+// played around `front` (the conversation front, 0.1 degree) so it ends facing the user.
+static std::string build_timeline(const std::string& motion, const std::string& color, int blinks,
+                                  uitk::Vector2i front, uint32_t& duration_ms)
 {
     static const std::vector<MotionStep> none;
     auto it          = motions().find(motion);
@@ -84,9 +86,9 @@ static std::string build_timeline(const std::string& motion, const std::string& 
         frame["leftEye"]["weight"]     = 100;
         frame["rightEye"]["weight"]    = 100;
         frame["mouth"]["weight"]       = 0;
-        frame["yawServo"]["angle"]     = active.yaw;
+        frame["yawServo"]["angle"]     = std::clamp(front.x + active.yaw, -1280, 1280);
         frame["yawServo"]["speed"]     = active.speed;
-        frame["pitchServo"]["angle"]   = active.pitch;
+        frame["pitchServo"]["angle"]   = std::clamp(front.y + active.pitch, 0, 900);
         frame["pitchServo"]["speed"]   = active.speed;
         frame["leftRgbColor"]          = rgb;
         frame["rightRgbColor"]         = rgb;
@@ -129,8 +131,13 @@ bool Hal::runAction(const Action_t& action, std::string& error)
         return false;
     }
 
+    uitk::Vector2i front;
+    {
+        LvglLockGuard lock;
+        front = GetStackChan().motion().getFront();
+    }
     uint32_t timeline_ms = 0;
-    std::string timeline = build_timeline(action.motion, action.ledColor, action.ledBlinks, timeline_ms);
+    std::string timeline = build_timeline(action.motion, action.ledColor, action.ledBlinks, front, timeline_ms);
     const int64_t end_us = esp_timer_get_time() + static_cast<int64_t>(timeline_ms) * 1000;
     if (!timeline.empty()) {
         onWsDanceData.emit(timeline);

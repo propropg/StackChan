@@ -71,6 +71,11 @@ private:
             return;
         }
 
+        if (motion.hasFront()) {
+            perform_front_idle_motion(motion);
+            return;
+        }
+
         int action = Random::getInstance().getInt(0, 100);
 
         if (action < 50) {
@@ -110,6 +115,38 @@ private:
             // mclog::info("action 4: go home to (0, {}) in speed {}", target_pitch, speed);
             motion.moveWithSpeed(0, target_pitch, speed);
         }
+    }
+
+    // Same moves around the conversation front (where the user's face was found), coming back to it often so
+    // StackChan mostly faces the user
+    void perform_front_idle_motion(motion::Motion& motion)
+    {
+        const auto front = motion.getFront();
+        auto& random     = Random::getInstance();
+        int action       = random.getInt(0, 100);
+        int target_yaw   = front.x;
+        int target_pitch = front.y;
+        int speed        = random.getInt(100, 250);
+
+        if (action < 35) {
+            // Look around near the user
+            target_yaw += random.getInt(-400, 400);
+            target_pitch += random.getInt(-150, 80);
+        } else if (action < 60) {
+            // Small move from where the head is, without drifting far from the user
+            auto current = motion.getCurrentAngles();
+            target_yaw   = uitk::clamp(current.x + random.getInt(-150, 150), front.x - 500, front.x + 500);
+            target_pitch = uitk::clamp(current.y + random.getInt(-80, 80), front.y - 200, front.y + 200);
+        } else if (action < 70) {
+            // Quick glance aside
+            target_yaw += random.getInt(-500, 500);
+            target_pitch += random.getInt(-100, 150);
+            speed = random.getInt(250, 400);
+        } else {
+            // Back to the user
+            target_pitch += random.getInt(-30, 30);
+        }
+        motion.moveWithSpeed(uitk::clamp(target_yaw, -800, 800), uitk::clamp(target_pitch, 0, 850), speed);
     }
 
     uint32_t _interval_min;

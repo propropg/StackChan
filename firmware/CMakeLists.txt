@@ -19,5 +19,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig.defaults.local")
     message(STATUS "StackChan: detected sdkconfig.defaults.local, applying overlay")
 endif()
 
+# esp-dl adds enough include paths to push some compile commands past the Windows command-line limit
+set(CMAKE_NINJA_FORCE_RESPONSE_FILE ON CACHE BOOL "" FORCE)
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(stack-chan)

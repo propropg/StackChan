@@ -245,12 +245,16 @@
     <div class="toggle" style="margin-top:8px"><span>夜は読み上げない</span><input type="checkbox" id="ntQuiet"></div>
     <div class="toggle" style="margin-top:8px"><span>チャットの本文も読み上げる</span><input type="checkbox" id="ntChatBody"></div>
     <p class="hint">オフのときは「〇〇さんからチャットが届いたよ」とだけ話します。吹き出しには本文も出ます。</p>
+    <div class="toggle" style="margin-top:8px"><span>読み上げるとき顔を探してこちらを向く</span><input type="checkbox" id="ntLookFace"></div>
+    <p class="hint">カメラで顔が見つかったときだけ首を動かします。見つからなければそのまま話します。</p>
 
     <div class="btns">
       <button class="b primary" id="ntSave">保存</button>
       <button class="b" id="ntCheck">保存して今すぐ確認</button>
+      <button class="b" id="ntFaceTest">顔を探すテスト（15秒）</button>
     </div>
     <p class="hint" id="ntStatus"></p>
+    <p class="hint" id="ntFaceStatus"></p>
   </div>
 </section>
 
@@ -526,6 +530,8 @@ function showSettings(s) {
   if (!$("ntInterval").value) $("ntInterval").add(new Option(nt.intervalSec + "秒", String(nt.intervalSec), true, true));
   $("ntQuiet").checked = !!nt.quietHours;
   $("ntChatBody").checked = !!nt.chatReadContent;
+  $("ntLookFace").checked = nt.lookAtFace !== false;
+  $("ntFaceStatus").textContent = faceStatusText(s.face);
   $("ntQuietStart").value = String(nt.quietStart); $("ntQuietEnd").value = String(nt.quietEnd);
   $("ntStatus").textContent = notifyStatusText(nt);
   // Device
@@ -643,7 +649,7 @@ function collectNotify() {
   const notify = {
     enabled: $("ntEnabled").checked, intervalSec: +$("ntInterval").value, quietHours: $("ntQuiet").checked,
     quietStart: +$("ntQuietStart").value, quietEnd: +$("ntQuietEnd").value,
-    chatReadContent: $("ntChatBody").checked,
+    chatReadContent: $("ntChatBody").checked, lookAtFace: $("ntLookFace").checked,
   };
   const url = $("ntUrl").value.trim();
   if (url && !/^https:\/\/script\.google\.com\/.+\/exec\?token=[0-9a-fA-F]+$/.test(url)) {
@@ -663,6 +669,23 @@ $("ntCheck").onclick = () => run($("ntCheck"), async () => {
     toast(r.count > 0 ? r.count + "件の通知を読み上げました" : "新しい通知はありません");
   } finally {
     loadSettings();
+  }
+});
+function faceStatusText(f) {
+  if (!f) return "";
+  if (f.error) return "顔検出: " + f.error;
+  if (!f.modelLoaded) return "顔検出: まだ使っていません";
+  const seen = f.lastSeenAgoMs < 0 ? "まだ顔を見ていません"
+    : `最後に顔を見たのは ${Math.round(f.lastSeenAgoMs / 1000)} 秒前（横 ${f.lastX.toFixed(2)} / 縦 ${f.lastY.toFixed(2)}）`;
+  return `顔検出: ${f.active ? "動作中" : "待機中"}、1回 ${f.inferMs} ms、${seen}`;
+}
+$("ntFaceTest").onclick = () => run($("ntFaceTest"), async () => {
+  await post("/api/face/test?seconds=15");
+  toast("15秒間、顔を探します。カメラの前に顔を出してください");
+  // Show what the camera sees while the test runs
+  for (let i = 0; i < 8; i++) {
+    await new Promise((r) => setTimeout(r, 2000));
+    $("ntFaceStatus").textContent = faceStatusText((await get("/api/settings")).face);
   }
 });
 

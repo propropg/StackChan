@@ -421,8 +421,11 @@ function(build_default_assets_bin)
     endif()
     
     # Add default assets extra files if defined
+    set(EXTRA_FILE_DEPENDS)
     if(DEFAULT_ASSETS_EXTRA_FILES)
         list(APPEND BUILD_ARGS "--extra_files" "${DEFAULT_ASSETS_EXTRA_FILES}")
+        # Rebuild assets.bin when a file there is added or changed
+        file(GLOB EXTRA_FILE_DEPENDS CONFIGURE_DEPENDS "${DEFAULT_ASSETS_EXTRA_FILES}/*")
     endif()
     
     list(APPEND BUILD_ARGS "--esp_sr_model_path" "${ESP_SR_MODEL_PATH}")
@@ -435,6 +438,7 @@ function(build_default_assets_bin)
         DEPENDS
             ${SDKCONFIG}
             ${XIAOZHI_MAIN_DIR}/../scripts/build_default_assets.py
+            ${EXTRA_FILE_DEPENDS}
         COMMENT "Building default assets.bin based on configuration"
         VERBATIM
     )

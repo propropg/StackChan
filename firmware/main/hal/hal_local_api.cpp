@@ -23,6 +23,7 @@
  *   GET  /api/voicevox/speakers                    -> speaker list (proxied, the key stays on the device)
  *   GET  /api/voicevox/points                      -> {"points":..,"resetInHours":..}
  *   POST /api/notify/check                         -> polls the Gmail / Calendar relay now, {"ok":true,"count":n}
+ *   POST /api/face/test?seconds=15                 looks for a face for a while (0 stops); status in GET /api/settings
  *   POST /api/action                               body: {"text","emotion","motion","bubble","ledColor","ledBlinks"}
  *   GET  /api/events                               -> Claude Code event templates (stop / notification / sessionEnd)
  *   POST /api/events                               body: any of the templates above (saved to flash)
@@ -635,6 +636,8 @@ void Hal::applyIdleModifiers()
 
 /* ------------------------- Settings / control API ------------------------- */
 
+static void face_status_to_json(ArduinoJson::JsonObject json);
+
 static esp_err_t handle_get_settings(httpd_req_t* req)
 {
     const auto idle = load_idle_settings();
@@ -674,9 +677,11 @@ static esp_err_t handle_get_settings(httpd_req_t* req)
     nt["quietStart"]     = notify.quietStart;
     nt["quietEnd"]       = notify.quietEnd;
     nt["chatReadContent"] = notify.chatReadContent;
+    nt["lookAtFace"]     = notify.lookAtFace;
     nt["lastCheckAgoSec"] = nstatus.lastCheckUs == 0 ? -1 : static_cast<int>((esp_timer_get_time() - nstatus.lastCheckUs) / 1000000);
     nt["lastCount"]      = nstatus.lastCount;
     nt["lastError"]      = nstatus.lastError;
+    face_status_to_json(doc["face"].to<ArduinoJson::JsonObject>());
 
     auto info         = doc["device"].to<ArduinoJson::JsonObject>();
     info["ip"]        = GetHAL().getLocalIp();
@@ -754,6 +759,7 @@ static esp_err_t handle_post_settings(httpd_req_t* req)
         if (nt["quietStart"].is<int>()) notify.quietStart = nt["quietStart"].as<int>();
         if (nt["quietEnd"].is<int>()) notify.quietEnd = nt["quietEnd"].as<int>();
         if (nt["chatReadContent"].is<bool>()) notify.chatReadContent = nt["chatReadContent"].as<bool>();
+        if (nt["lookAtFace"].is<bool>()) notify.lookAtFace = nt["lookAtFace"].as<bool>();
         GetHAL().setNotifyConfig(notify);
     }
 
@@ -912,6 +918,42 @@ static esp_err_t handle_notify_check(httpd_req_t* req)
         return send_error(req, "502 Bad Gateway", error);
     }
     return send_json(req, "200 OK", "{\"ok\":true,\"count\":" + std::to_string(count) + "}");
+}
+
+/* ------------------------------ Face tracking ----------------------------- */
+
+static void face_status_to_json(ArduinoJson::JsonObject json)
+{
+    const auto face     = GetHAL().getFaceTrackStatus();
+    json["modelLoaded"] = face.modelLoaded;
+    json["error"]       = face.error;
+    json["active"]      = face.active;
+    json["inferMs"]     = face.inferMs;
+    json["faces"]       = face.faces;
+    json["lastSeenAgoMs"] = face.lastSeenUs == 0 ? -1 : static_cast<int>((esp_timer_get_time() - face.lastSeenUs) / 1000);
+    json["lastX"]       = face.lastX;
+    json["lastY"]       = face.lastY;
+}
+
+// Track faces for ?seconds= (default 15, 0 stops) so the camera direction can be checked without a notification
+static esp_err_t handle_face_test(httpd_req_t* req)
+{
+    std::string seconds = get_query_param(req, "seconds");
+    int sec             = seconds.empty() ? 15 : std::clamp(atoi(seconds.c_str()), 0, 120);
+    {
+        LvglLockGuard lock;
+        if (sec > 0 && !GetStackChan().hasAvatar()) {
+            return send_error(req, "409 Conflict", "open the AVATAR app first");
+        }
+    }
+    GetHAL().trackFaceFor(sec * 1000);
+
+    ArduinoJson::JsonDocument doc;
+    doc["ok"] = true;
+    face_status_to_json(doc["face"].to<ArduinoJson::JsonObject>());
+    std::string out;
+    ArduinoJson::serializeJson(doc, out);
+    return send_json(req, "200 OK", out);
 }
 
 /* ------------------------------ Settings page ----------------------------- */
@@ -1132,6 +1174,7 @@ void Hal::startLocalApiService(std::function<void(std::string_view)> onStartLog)
         {.uri = "/api/voicevox/speakers", .method = HTTP_GET, .handler = handle_voicevox_json, .user_ctx = (void*)"speakers"},
         {.uri = "/api/voicevox/points", .method = HTTP_GET, .handler = handle_voicevox_json, .user_ctx = (void*)"points"},
         {.uri = "/api/notify/check", .method = HTTP_POST, .handler = handle_notify_check, .user_ctx = nullptr},
+        {.uri = "/api/face/test", .method = HTTP_POST, .handler = handle_face_test, .user_ctx = nullptr},
         {.uri = "/api/action", .method = HTTP_POST, .handler = handle_action, .user_ctx = nullptr},
         {.uri = "/api/events", .method = HTTP_GET, .handler = handle_get_events, .user_ctx = nullptr},
         {.uri = "/api/events", .method = HTTP_POST, .handler = handle_post_events, .user_ctx = nullptr},

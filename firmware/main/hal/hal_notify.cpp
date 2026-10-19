@@ -52,6 +52,7 @@ NotifyConfig_t Hal::getNotifyConfig()
     out.quietStart  = settings.GetInt("quiet_start", out.quietStart);
     out.quietEnd    = settings.GetInt("quiet_end", out.quietEnd);
     out.chatReadContent = settings.GetBool("chat_body", out.chatReadContent);
+    out.lookAtFace      = settings.GetBool("look_face", out.lookAtFace);
     return out;
 }
 
@@ -65,6 +66,7 @@ void Hal::setNotifyConfig(const NotifyConfig_t& config)
     settings.SetInt("quiet_start", std::clamp(config.quietStart, 0, 23));
     settings.SetInt("quiet_end", std::clamp(config.quietEnd, 0, 23));
     settings.SetBool("chat_body", config.chatReadContent);
+    settings.SetBool("look_face", config.lookAtFace);
     mclog::tagInfo(_tag, "config saved: enabled={}, url={}, interval={}s", config.enabled,
                    config.url.empty() ? "none" : "set", config.intervalSec);
     // Apply the new interval / enable right away
@@ -125,7 +127,7 @@ static std::string spoken_text(ArduinoJson::JsonVariantConst item, bool chat_rea
     return item["text"].as<std::string>();
 }
 
-static bool poll(const std::string& url, bool chat_read_content, int& count, std::string& error)
+static bool poll(const NotifyConfig_t& config, int& count, std::string& error)
 {
     std::lock_guard<std::mutex> poll_lock(_poll_mutex);
     count = 0;
@@ -137,7 +139,7 @@ static bool poll(const std::string& url, bool chat_read_content, int& count, std
     } else {
         PsramBytes body;
         int status = 0;
-        if (https_get(url, _max_response_size, body, status, error)) {
+        if (https_get(config.url, _max_response_size, body, status, error)) {
             ArduinoJson::JsonDocument doc;
             if (status != 200) {
                 error = "HTTP " + std::to_string(status);
@@ -149,7 +151,7 @@ static bool poll(const std::string& url, bool chat_read_content, int& count, std
             } else {
                 for (auto item : doc["items"].as<ArduinoJson::JsonArray>()) {
                     if (item["text"].is<const char*>()) {
-                        items.emplace_back(spoken_text(item, chat_read_content),
+                        items.emplace_back(spoken_text(item, config.chatReadContent),
                                            item["bubble"].is<const char*>() ? item["bubble"].as<std::string>() : "");
                     }
                 }
@@ -173,8 +175,16 @@ static bool poll(const std::string& url, bool chat_read_content, int& count, std
     if (count > 0) {
         mclog::tagInfo(_tag, "{} new items", count);
     }
+    // Start looking for the user while the first item is still being synthesized
+    const bool look = count > 0 && config.lookAtFace;
+    if (look) {
+        GetHAL().beginFaceTracking();
+    }
     for (const auto& [text, bubble] : items) {
         announce(text, bubble);
+    }
+    if (look) {
+        GetHAL().endFaceTracking();
     }
     return true;
 }
@@ -200,7 +210,7 @@ static void notify_task(void*)
         }
         int count = 0;
         std::string error;
-        poll(config.url, config.chatReadContent, count, error);
+        poll(config, count, error);
     }
 }
 
@@ -228,5 +238,5 @@ bool Hal::checkNotificationsNow(int& count, std::string& error)
         error = "relay URL not set";
         return false;
     }
-    return poll(config.url, config.chatReadContent, count, error);
+    return poll(config, count, error);
 }

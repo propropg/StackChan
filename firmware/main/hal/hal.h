@@ -154,6 +154,17 @@ struct NotifyConfig_t {
     int quietStart  = 22;
     int quietEnd    = 7;
     bool chatReadContent = false;  // read Google Chat message text aloud; otherwise only who sent it
+    bool lookAtFace      = true;   // turn toward a face seen by the camera while reading items aloud
+};
+
+struct FaceTrackStatus_t {
+    bool modelLoaded = false;
+    std::string error;   // why the models could not be loaded
+    bool active      = false;
+    int inferMs      = 0;  // detection time of the last frame
+    int faces        = 0;  // faces in the last frame
+    int64_t lastSeenUs = 0;  // esp_timer time a face was last seen, 0 = never
+    float lastX = 0.0f, lastY = 0.0f;  // where it was, -1..1 from the image centre (x right, y down)
 };
 
 struct NotifyStatus_t {
@@ -342,6 +353,15 @@ public:
     void setNotifyActive(bool active);
     // Poll right now regardless of the interval / quiet hours; speaks what it finds. Blocks.
     bool checkNotificationsNow(int& count, std::string& error);
+
+    /* ------------------------------ Face tracking ----------------------------- */
+    // Turn the head toward a face seen by the camera (ESP-DL, models in the assets partition) while held.
+    // The head is left alone when no face is seen. Calls nest; every begin needs an end.
+    void beginFaceTracking();
+    void endFaceTracking();
+    // Track for a while without an end call (settings page test)
+    void trackFaceFor(uint32_t ms);
+    FaceTrackStatus_t getFaceTrackStatus();
 
     /* -------------------------------- VOICEVOX -------------------------------- */
     // Cloud VOICEVOX (WEB版VOICEVOX API by su-shiki), configured from the web settings page or SETUP

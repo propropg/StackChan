@@ -362,6 +362,8 @@ public:
     // Track for a while without an end call (settings page test)
     void trackFaceFor(uint32_t ms);
     FaceTrackStatus_t getFaceTrackStatus();
+    // The camera frame exactly as the face detector sees it (24-bit BMP)
+    bool getFaceCameraBmp(PsramBytes& bmp, std::string& error);
 
     /* -------------------------------- VOICEVOX -------------------------------- */
     // Cloud VOICEVOX (WEB版VOICEVOX API by su-shiki), configured from the web settings page or SETUP

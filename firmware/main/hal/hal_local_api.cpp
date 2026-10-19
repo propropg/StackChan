@@ -24,6 +24,7 @@
  *   GET  /api/voicevox/points                      -> {"points":..,"resetInHours":..}
  *   POST /api/notify/check                         -> polls the Gmail / Calendar relay now, {"ok":true,"count":n}
  *   POST /api/face/test?seconds=15                 looks for a face for a while (0 stops); status in GET /api/settings
+ *   GET  /api/face/frame.bmp                       -> the camera frame as the face detector sees it
  *   POST /api/action                               body: {"text","emotion","motion","bubble","ledColor","ledBlinks"}
  *   GET  /api/events                               -> Claude Code event templates (stop / notification / sessionEnd)
  *   POST /api/events                               body: any of the templates above (saved to flash)
@@ -956,6 +957,19 @@ static esp_err_t handle_face_test(httpd_req_t* req)
     return send_json(req, "200 OK", out);
 }
 
+// What the camera sees, as the face detector gets it
+static esp_err_t handle_face_frame(httpd_req_t* req)
+{
+    PsramBytes bmp;
+    std::string error;
+    if (!GetHAL().getFaceCameraBmp(bmp, error)) {
+        return send_error(req, "503 Service Unavailable", error);
+    }
+    httpd_resp_set_type(req, "image/bmp");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, reinterpret_cast<const char*>(bmp.data()), bmp.size());
+}
+
 /* ------------------------------ Settings page ----------------------------- */
 
 extern const uint8_t _settings_html_start[] asm("_binary_settings_html_start");
@@ -1175,6 +1189,7 @@ void Hal::startLocalApiService(std::function<void(std::string_view)> onStartLog)
         {.uri = "/api/voicevox/points", .method = HTTP_GET, .handler = handle_voicevox_json, .user_ctx = (void*)"points"},
         {.uri = "/api/notify/check", .method = HTTP_POST, .handler = handle_notify_check, .user_ctx = nullptr},
         {.uri = "/api/face/test", .method = HTTP_POST, .handler = handle_face_test, .user_ctx = nullptr},
+        {.uri = "/api/face/frame.bmp", .method = HTTP_GET, .handler = handle_face_frame, .user_ctx = nullptr},
         {.uri = "/api/action", .method = HTTP_POST, .handler = handle_action, .user_ctx = nullptr},
         {.uri = "/api/events", .method = HTTP_GET, .handler = handle_get_events, .user_ctx = nullptr},
         {.uri = "/api/events", .method = HTTP_POST, .handler = handle_post_events, .user_ctx = nullptr},

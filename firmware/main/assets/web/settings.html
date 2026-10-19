@@ -255,6 +255,7 @@
     </div>
     <p class="hint" id="ntStatus"></p>
     <p class="hint" id="ntFaceStatus"></p>
+    <img id="ntFaceFrame" alt="カメラの映像" style="display:none;width:100%;max-width:320px;border-radius:8px;margin-top:8px">
   </div>
 </section>
 
@@ -677,15 +678,18 @@ function faceStatusText(f) {
   if (!f.modelLoaded) return "顔検出: まだ使っていません";
   const seen = f.lastSeenAgoMs < 0 ? "まだ顔を見ていません"
     : `最後に顔を見たのは ${Math.round(f.lastSeenAgoMs / 1000)} 秒前（横 ${f.lastX.toFixed(2)} / 縦 ${f.lastY.toFixed(2)}）`;
-  return `顔検出: ${f.active ? "動作中" : "待機中"}、1回 ${f.inferMs} ms、${seen}`;
+  return `顔検出: ${f.active ? "動作中" : "待機中"}、1回 ${f.inferMs} ms、直近の画像の顔 ${f.faces} 個、${seen}`;
 }
 $("ntFaceTest").onclick = () => run($("ntFaceTest"), async () => {
   await post("/api/face/test?seconds=15");
   toast("15秒間、顔を探します。カメラの前に顔を出してください");
   // Show what the camera sees while the test runs
+  const frame = $("ntFaceFrame");
+  frame.style.display = "block";
   for (let i = 0; i < 8; i++) {
     await new Promise((r) => setTimeout(r, 2000));
     $("ntFaceStatus").textContent = faceStatusText((await get("/api/settings")).face);
+    await new Promise((r) => { frame.onload = frame.onerror = r; frame.src = "/api/face/frame.bmp?t=" + Date.now(); });
   }
 });
 

@@ -5,7 +5,8 @@
  * toward it. Faces are found with the ESP-DL MSR+MNP detector (the models of espressif/human_face_detect,
  * stored in the assets partition as face_msr_s8_v1.espdl / face_mnp_s8_v1.espdl). The camera sits in the
  * head, so each step turns by the face's offset from the image centre and the next frame shows what is left.
- * When no face is seen the head is left alone.
+ * When no face is seen the head is left alone, except that each session first looks where the face was last
+ * time and comes back if it is not there.
  */
 #include "hal.h"
 #include "board/hal_bridge.h"
@@ -47,6 +48,7 @@ static constexpr int _pitch_max = 600;
 
 static constexpr uint32_t _settle_ms   = 120;  // let the head stop shaking before grabbing a frame
 static constexpr uint32_t _interval_ms = 100;  // pause between detections so the audio task keeps up
+static constexpr int _recall_frames    = 4;    // frames to look for the user where they were last time
 
 /* -------------------------------- Detector -------------------------------- */
 
@@ -210,12 +212,12 @@ static bool to_rgb888(const uint8_t* src, int width, int height, int format, uin
     return false;
 }
 
-// Grab a fresh frame and find the most confident face. Returns false when the camera fails.
-static bool detect(FaceDetector& detector, bool& found, Face& face)
-{
-    static uint8_t* rgb      = nullptr;
-    static size_t rgb_size   = 0;
+static std::mutex _camera_mutex;  // the tracker and the snapshot endpoint share the camera
 
+// Grab a fresh frame as RGB888 into buf (reallocated when the size changes). Returns false when the camera fails.
+static bool grab_rgb888(uint8_t*& buf, size_t& buf_size, int& width, int& height)
+{
+    std::lock_guard<std::mutex> lock(_camera_mutex);
     auto camera = hal_bridge::board_get_camera();
     if (!camera) {
         return false;
@@ -224,19 +226,32 @@ static bool detect(FaceDetector& detector, bool& found, Face& face)
     if (!camera->StreamCaptures() || !camera->StreamCaptures()) {
         return false;
     }
-    const int width  = camera->GetFrameWidth();
-    const int height = camera->GetFrameHeight();
+    width             = camera->GetFrameWidth();
+    height            = camera->GetFrameHeight();
     const size_t need = static_cast<size_t>(width) * height * 3;
-    if (rgb_size != need) {
-        heap_caps_free(rgb);
-        rgb      = static_cast<uint8_t*>(heap_caps_malloc(need, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-        rgb_size = rgb ? need : 0;
-        if (!rgb) {
+    if (buf_size != need) {
+        heap_caps_free(buf);
+        buf      = static_cast<uint8_t*>(heap_caps_malloc(need, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        buf_size = buf ? need : 0;
+        if (!buf) {
             return false;
         }
     }
-    if (!to_rgb888(camera->GetFrameData(), width, height, camera->GetFrameFormat(), rgb)) {
+    if (!to_rgb888(camera->GetFrameData(), width, height, camera->GetFrameFormat(), buf)) {
         mclog::tagError(_tag, "unsupported camera format 0x{:08x}", camera->GetFrameFormat());
+        return false;
+    }
+    return true;
+}
+
+// Grab a fresh frame and find the most confident face. Returns false when the camera fails.
+static bool detect(FaceDetector& detector, bool& found, Face& face)
+{
+    static uint8_t* rgb    = nullptr;
+    static size_t rgb_size = 0;
+
+    int width = 0, height = 0;
+    if (!grab_rgb888(rgb, rgb_size, width, height)) {
         return false;
     }
     dl::image::img_t img = {.data     = rgb,
@@ -268,11 +283,44 @@ static bool detect(FaceDetector& detector, bool& found, Face& face)
     return true;
 }
 
+// Head angles (0.1 degree) that last faced the user; the next session looks there first
+static bool _has_last_face = false;
+static int _last_face_yaw = 0, _last_face_pitch = 0;
+
+// Move the head unless someone else (IMU pick-up) holds it. Our modify lock keeps idle motion / head pet away.
+static bool move_head(int yaw, int pitch, bool& holding_motion)
+{
+    LvglLockGuard lock;
+    auto& motion = GetStackChan().motion();
+    if (!holding_motion && motion.isModifyLocked()) {
+        return false;
+    }
+    motion.setModifyLock(true);
+    holding_motion = true;
+    motion.moveWithSpeed(std::clamp(yaw, -_yaw_limit, _yaw_limit), std::clamp(pitch, 0, _pitch_max), _move_speed);
+    return true;
+}
+
 static void track(FaceDetector& detector)
 {
     mclog::tagInfo(_tag, "tracking started");
     set_status([](FaceTrackStatus_t& s) { s.active = true; });
-    bool holding_motion = false;  // our modify lock keeps idle motion / head pet from moving the head
+    bool holding_motion = false;
+
+    // Look where the user was last time first; if they are not there after a few frames, go back and watch from
+    // where the head started
+    int start_yaw = 0, start_pitch = 0;
+    {
+        LvglLockGuard lock;
+        auto& motion = GetStackChan().motion();
+        start_yaw    = motion.getCurrentYawAngle();
+        start_pitch  = motion.getCurrentPitchAngle();
+    }
+    int recall_tries = 0;
+    if (_has_last_face && move_head(_last_face_yaw, _last_face_pitch, holding_motion)) {
+        recall_tries = _recall_frames;
+        mclog::tagInfo(_tag, "looking where the face was last time ({}, {})", _last_face_yaw / 10, _last_face_pitch / 10);
+    }
 
     while (wanted()) {
         bool moving = false;
@@ -297,23 +345,26 @@ static void track(FaceDetector& detector)
             continue;
         }
         if (found) {
+            recall_tries = 0;
             // Image right is StackChan's right (positive yaw); image up is positive pitch
             const float yaw_deg   = face.x * _hfov_deg * 0.5f * _gain;
             const float pitch_deg = -face.y * _vfov_deg * 0.5f * _gain;
-            if (std::fabs(yaw_deg) > _deadband_deg || std::fabs(pitch_deg) > _deadband_deg) {
+            int yaw = 0, pitch = 0;
+            {
                 LvglLockGuard lock;
                 auto& motion = GetStackChan().motion();
-                // Someone else (IMU pick-up) has the head; leave it to them
-                if (holding_motion || !motion.isModifyLocked()) {
-                    motion.setModifyLock(true);
-                    holding_motion = true;
-                    int yaw        = motion.getCurrentYawAngle() + static_cast<int>(yaw_deg * 10);
-                    int pitch      = motion.getCurrentPitchAngle() + static_cast<int>(pitch_deg * 10);
-                    yaw            = std::clamp(yaw, -_yaw_limit, _yaw_limit);
-                    pitch          = std::clamp(pitch, 0, _pitch_max);
-                    motion.moveWithSpeed(yaw, pitch, _move_speed);
-                }
+                yaw          = std::clamp(motion.getCurrentYawAngle() + static_cast<int>(yaw_deg * 10), -_yaw_limit, _yaw_limit);
+                pitch        = std::clamp(motion.getCurrentPitchAngle() + static_cast<int>(pitch_deg * 10), 0, _pitch_max);
             }
+            _has_last_face   = true;
+            _last_face_yaw   = yaw;
+            _last_face_pitch = pitch;
+            if (std::fabs(yaw_deg) > _deadband_deg || std::fabs(pitch_deg) > _deadband_deg) {
+                move_head(yaw, pitch, holding_motion);
+            }
+        } else if (recall_tries > 0 && --recall_tries == 0) {
+            mclog::tagInfo(_tag, "no face where it was last time, going back");
+            move_head(start_yaw, start_pitch, holding_motion);
         }
         vTaskDelay(pdMS_TO_TICKS(_interval_ms));
     }
@@ -391,4 +442,45 @@ FaceTrackStatus_t Hal::getFaceTrackStatus()
 {
     std::lock_guard<std::mutex> lock(_status_mutex);
     return _status;
+}
+
+bool Hal::getFaceCameraBmp(PsramBytes& bmp, std::string& error)
+{
+    uint8_t* rgb    = nullptr;
+    size_t rgb_size = 0;
+    int width = 0, height = 0;
+    if (!grab_rgb888(rgb, rgb_size, width, height)) {
+        heap_caps_free(rgb);
+        error = "camera capture failed";
+        return false;
+    }
+
+    // 24-bit BMP: bottom-up rows of BGR, each padded to 4 bytes
+    const uint32_t row   = (width * 3 + 3) & ~3u;
+    const uint32_t data  = row * height;
+    const uint32_t total = 54 + data;
+    bmp.assign(total, 0);
+    auto put16 = [&](size_t at, uint16_t v) { bmp[at] = v & 0xff; bmp[at + 1] = v >> 8; };
+    auto put32 = [&](size_t at, uint32_t v) { for (int i = 0; i < 4; ++i) bmp[at + i] = (v >> (i * 8)) & 0xff; };
+    bmp[0] = 'B';
+    bmp[1] = 'M';
+    put32(2, total);
+    put32(10, 54);
+    put32(14, 40);
+    put32(18, width);
+    put32(22, height);
+    put16(26, 1);
+    put16(28, 24);
+    put32(34, data);
+    for (int y = 0; y < height; ++y) {
+        const uint8_t* src = rgb + static_cast<size_t>(height - 1 - y) * width * 3;
+        uint8_t* dst       = bmp.data() + 54 + static_cast<size_t>(y) * row;
+        for (int x = 0; x < width; ++x, src += 3, dst += 3) {
+            dst[0] = src[2];
+            dst[1] = src[1];
+            dst[2] = src[0];
+        }
+    }
+    heap_caps_free(rgb);
+    return true;
 }

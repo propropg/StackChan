@@ -673,6 +673,7 @@ static esp_err_t handle_get_settings(httpd_req_t* req)
     nt["quietHours"]     = notify.quietHours;
     nt["quietStart"]     = notify.quietStart;
     nt["quietEnd"]       = notify.quietEnd;
+    nt["chatReadContent"] = notify.chatReadContent;
     nt["lastCheckAgoSec"] = nstatus.lastCheckUs == 0 ? -1 : static_cast<int>((esp_timer_get_time() - nstatus.lastCheckUs) / 1000000);
     nt["lastCount"]      = nstatus.lastCount;
     nt["lastError"]      = nstatus.lastError;
@@ -752,6 +753,7 @@ static esp_err_t handle_post_settings(httpd_req_t* req)
         if (nt["quietHours"].is<bool>()) notify.quietHours = nt["quietHours"].as<bool>();
         if (nt["quietStart"].is<int>()) notify.quietStart = nt["quietStart"].as<int>();
         if (nt["quietEnd"].is<int>()) notify.quietEnd = nt["quietEnd"].as<int>();
+        if (nt["chatReadContent"].is<bool>()) notify.chatReadContent = nt["chatReadContent"].as<bool>();
         GetHAL().setNotifyConfig(notify);
     }
 

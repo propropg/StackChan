@@ -243,6 +243,8 @@
         <span class="hours"><select id="ntQuietStart"></select> 時 〜 <select id="ntQuietEnd"></select> 時</span></div>
     </div>
     <div class="toggle" style="margin-top:8px"><span>夜は読み上げない</span><input type="checkbox" id="ntQuiet"></div>
+    <div class="toggle" style="margin-top:8px"><span>チャットの本文も読み上げる</span><input type="checkbox" id="ntChatBody"></div>
+    <p class="hint">オフのときは「〇〇さんからチャットが届いたよ」とだけ話します。吹き出しには本文も出ます。</p>
 
     <div class="btns">
       <button class="b primary" id="ntSave">保存</button>
@@ -523,6 +525,7 @@ function showSettings(s) {
   $("ntInterval").value = String(nt.intervalSec);
   if (!$("ntInterval").value) $("ntInterval").add(new Option(nt.intervalSec + "秒", String(nt.intervalSec), true, true));
   $("ntQuiet").checked = !!nt.quietHours;
+  $("ntChatBody").checked = !!nt.chatReadContent;
   $("ntQuietStart").value = String(nt.quietStart); $("ntQuietEnd").value = String(nt.quietEnd);
   $("ntStatus").textContent = notifyStatusText(nt);
   // Device
@@ -640,6 +643,7 @@ function collectNotify() {
   const notify = {
     enabled: $("ntEnabled").checked, intervalSec: +$("ntInterval").value, quietHours: $("ntQuiet").checked,
     quietStart: +$("ntQuietStart").value, quietEnd: +$("ntQuietEnd").value,
+    chatReadContent: $("ntChatBody").checked,
   };
   const url = $("ntUrl").value.trim();
   if (url && !/^https:\/\/script\.google\.com\/.+\/exec\?token=[0-9a-fA-F]+$/.test(url)) {

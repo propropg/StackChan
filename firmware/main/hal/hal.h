@@ -153,6 +153,7 @@ struct NotifyConfig_t {
     bool quietHours = true;  // no announcements between quietStart and quietEnd (hours, local time)
     int quietStart  = 22;
     int quietEnd    = 7;
+    bool chatReadContent = false;  // read Google Chat message text aloud; otherwise only who sent it
 };
 
 struct NotifyStatus_t {

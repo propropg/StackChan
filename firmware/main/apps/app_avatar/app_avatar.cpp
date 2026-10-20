@@ -241,6 +241,9 @@ void AppAvatar::onOpen()
     // Read new Gmail / Calendar items aloud while this app is open
     GetHAL().startNotifyService();
     GetHAL().setNotifyActive(true);
+
+    // Look for the user every few minutes while idling here
+    GetHAL().setFaceIdleActive(true);
 }
 
 void AppAvatar::onRunning()
@@ -282,6 +285,7 @@ void AppAvatar::onClose()
     mclog::tagInfo(getAppInfo().name, "on close");
 
     GetHAL().setNotifyActive(false);
+    GetHAL().setFaceIdleActive(false);
 
     {
         LvglLockGuard lock;

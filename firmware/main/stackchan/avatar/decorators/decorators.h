@@ -187,4 +187,30 @@ private:
     int _animation_index = 0;
 };
 
+/**
+ * @brief "We made eye contact" badge: a small blinking eye icon in the top left corner, shown when the face
+ * tracker finds the user
+ *
+ */
+class EyeContactDecorator : public Decorator {
+public:
+    /**
+     * @param parent
+     * @param destroyAfterMs Destroy after milliseconds, 0 for infinite
+     */
+    EyeContactDecorator(lv_obj_t* parent, uint32_t destroyAfterMs = 3000);
+    ~EyeContactDecorator();
+
+    void _update() override;
+    void setVisible(bool visible) override;
+
+private:
+    lv_obj_t* _badge = nullptr;
+
+    uint32_t _destroy_at     = 0;
+    uint32_t _next_blink     = 0;
+    bool _has_lifetime       = false;
+    bool _dim                = false;
+};
+
 }  // namespace stackchan::avatar

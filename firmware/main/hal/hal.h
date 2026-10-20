@@ -370,6 +370,12 @@ public:
     // Load it with the LVGL lock held (AVATAR app start). Reset forgets it (head centres on 0 again).
     void loadFaceFront();
     void resetFaceFront();
+    // Look for the user every intervalMinutes (0 = never) while idle, and whether finding them shows the
+    // eye-contact badge. Only runs between setFaceIdleActive(true) and (false) (AVATAR app open).
+    void setFaceIdleSearch(int intervalMinutes, bool eyeContactMark);
+    void setFaceIdleActive(bool active);
+    // Something is playing or recording right now (speakText, playWav, ...)
+    bool isAudioBusy();
 
     /* -------------------------------- VOICEVOX -------------------------------- */
     // Cloud VOICEVOX (WEB版VOICEVOX API by su-shiki), configured from the web settings page or SETUP

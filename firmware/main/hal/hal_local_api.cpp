@@ -354,6 +354,15 @@ static const char* play_wav(const uint8_t* buf, size_t len, const std::string& t
     return nullptr;
 }
 
+bool Hal::isAudioBusy()
+{
+    if (!_audio_mutex.try_lock()) {
+        return true;
+    }
+    _audio_mutex.unlock();
+    return false;
+}
+
 bool Hal::playWav(const uint8_t* data, size_t size, const std::string& emotion, const std::string& bubble,
                   std::string& error)
 {
@@ -581,6 +590,8 @@ struct IdleSettings {
     bool expression = true;
     bool headPet    = true;
     bool imu        = true;
+    int faceSearchMin   = 3;     // look for the user every few minutes, 0 = never
+    bool eyeContactMark = true;  // badge on the face when the user is found
 };
 
 static IdleSettings load_idle_settings()
@@ -593,6 +604,8 @@ static IdleSettings load_idle_settings()
     out.expression = settings.GetBool("idle_expr", true);
     out.headPet    = settings.GetBool("idle_headpet", true);
     out.imu        = settings.GetBool("idle_imu", true);
+    out.faceSearchMin  = settings.GetInt("idle_face_min", out.faceSearchMin);
+    out.eyeContactMark = settings.GetBool("idle_eye_mark", out.eyeContactMark);
     return out;
 }
 
@@ -609,6 +622,8 @@ static void save_idle_settings(const IdleSettings& idle)
     settings.SetBool("idle_expr", idle.expression);
     settings.SetBool("idle_headpet", idle.headPet);
     settings.SetBool("idle_imu", idle.imu);
+    settings.SetInt("idle_face_min", idle.faceSearchMin);
+    settings.SetBool("idle_eye_mark", idle.eyeContactMark);
 }
 
 static std::vector<int> _idle_modifier_ids;
@@ -639,6 +654,7 @@ void Hal::applyIdleModifiers()
         case 3: add(std::make_unique<IdleMotionModifier>(2000, 4000)); break;
         default: break;
     }
+    setFaceIdleSearch(idle.faceSearchMin, idle.eyeContactMark);
     mclog::tagInfo(_tag, "idle modifiers applied: motion level {}, {} modifiers", idle.motionLevel,
                    _idle_modifier_ids.size());
 }
@@ -661,6 +677,8 @@ static esp_err_t handle_get_settings(httpd_req_t* req)
     doc["idleExpression"]  = idle.expression;
     doc["headPet"]         = idle.headPet;
     doc["imu"]             = idle.imu;
+    doc["faceSearchMin"]   = idle.faceSearchMin;
+    doc["eyeContactMark"]  = idle.eyeContactMark;
 
     // The API key itself never leaves the device; only whether it is set and its last characters
     const auto voicevox       = GetHAL().getVoicevoxConfig();
@@ -792,6 +810,11 @@ static esp_err_t handle_post_settings(httpd_req_t* req)
     read_bool("idleExpression", idle.expression);
     read_bool("headPet", idle.headPet);
     read_bool("imu", idle.imu);
+    read_bool("eyeContactMark", idle.eyeContactMark);
+    if (doc["faceSearchMin"].is<int>()) {
+        idle.faceSearchMin = std::clamp(doc["faceSearchMin"].as<int>(), 0, 60);
+        idle_changed       = true;
+    }
 
     if (idle_changed) {
         save_idle_settings(idle);

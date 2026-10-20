@@ -281,7 +281,13 @@
       <option value="0">しない</option><option value="1">控えめ（8〜12秒おき）</option>
       <option value="2">普通（4〜8秒おき）</option><option value="3">活発（2〜4秒おき）</option>
     </select>
+    <label>ときどき顔を探す（カメラ）</label>
+    <select id="faceSearchMin">
+      <option value="0">しない</option><option value="1">1分くらいおき</option><option value="3">3分くらいおき</option>
+      <option value="5">5分くらいおき</option><option value="10">10分くらいおき</option>
+    </select>
     <div style="margin-top:8px">
+      <div class="toggle"><span>目が合ったら画面にマークを出す</span><input type="checkbox" data-idle="eyeContactMark"></div>
       <div class="toggle"><span>まばたき</span><input type="checkbox" data-idle="blink"></div>
       <div class="toggle"><span>呼吸（顔がゆっくり揺れる）</span><input type="checkbox" data-idle="breath"></div>
       <div class="toggle"><span>表情の変化</span><input type="checkbox" data-idle="idleExpression"></div>
@@ -541,6 +547,8 @@ function showSettings(s) {
   $("bri").value = s.brightness; $("briVal").textContent = s.brightness;
   if ([...$("tz").options].some((o) => o.value === s.timezone)) $("tz").value = s.timezone;
   $("idleLevel").value = s.idleMotionLevel;
+  $("faceSearchMin").value = String(s.faceSearchMin ?? 3);
+  if (!$("faceSearchMin").value) $("faceSearchMin").add(new Option(s.faceSearchMin + "分くらいおき", String(s.faceSearchMin), true, true));
   document.querySelectorAll("[data-idle]").forEach((c) => c.checked = !!s[c.dataset.idle]);
   const d = s.device || {}, up = d.uptimeSec || 0;
   $("devInfo").innerHTML = [
@@ -706,6 +714,7 @@ $("vol").oninput = () => { $("volVal").textContent = $("vol").value; saveDevice(
 $("bri").oninput = () => { $("briVal").textContent = $("bri").value; saveDevice({ brightness: +$("bri").value }); };
 $("tz").onchange = () => saveDevice({ timezone: $("tz").value });
 $("idleLevel").onchange = () => saveDevice({ idleMotionLevel: +$("idleLevel").value });
+$("faceSearchMin").onchange = () => saveDevice({ faceSearchMin: +$("faceSearchMin").value });
 document.querySelectorAll("[data-idle]").forEach((c) => c.onchange = () => saveDevice({ [c.dataset.idle]: c.checked }));
 $("servoOn").onclick = () => run($("servoOn"), () => post("/api/servo", { power: true }), "サーボをオンにしました");
 $("servoOff").onclick = () => run($("servoOff"), () => post("/api/servo", { power: false }), "サーボをオフにしました");

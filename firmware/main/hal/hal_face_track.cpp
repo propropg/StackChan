@@ -7,11 +7,16 @@
  * head, so each step turns by the face's offset from the image centre and the next frame shows what is left.
  * Until a face is found, each session looks where the face was last time, then a little up and to the sides,
  * and comes back to where it started if nobody is there.
+ *
+ * Besides notifications, a short session runs every few minutes while the AVATAR app idles, and finding the
+ * user shows an eye-contact badge on the face (EyeContactDecorator).
  */
 #include "hal.h"
 #include "board/hal_bridge.h"
 #include "board/stackchan_camera.h"
 #include <stackchan/stackchan.h>
+#include <stackchan/avatar/decorators/decorators.h>
+#include <esp_random.h>
 #include <assets.h>
 #include <mooncake_log.h>
 #include <settings.h>
@@ -350,6 +355,26 @@ static void save_front(int yaw, int pitch)
     }
 }
 
+// "We made eye contact" badge on the face when the user is found
+static std::atomic<bool> _eye_mark{true};
+static int64_t _last_mark_us                = 0;
+static constexpr uint32_t _mark_ms          = 3000;
+static constexpr int64_t _mark_min_gap_us   = 5 * 1000000LL;  // do not flash it again right after it went away
+
+static void show_eye_contact()
+{
+    const int64_t now = esp_timer_get_time();
+    if (!_eye_mark || (_last_mark_us != 0 && now - _last_mark_us < _mark_ms * 1000LL + _mark_min_gap_us)) {
+        return;
+    }
+    LvglLockGuard lock;
+    auto& stackchan = GetStackChan();
+    if (stackchan.hasAvatar()) {
+        stackchan.avatar().addDecorator(std::make_unique<avatar::EyeContactDecorator>(lv_screen_active(), _mark_ms));
+        _last_mark_us = now;
+    }
+}
+
 // Move the head unless someone else (IMU pick-up) holds it. Our modify lock keeps idle motion / head pet away.
 static bool move_head(int yaw, int pitch, bool& holding_motion)
 {
@@ -445,6 +470,9 @@ static void track(FaceDetector& detector)
             hit_yaw   = yaw;
             hit_pitch = pitch;
 
+            if (hits == _confirm_move) {
+                show_eye_contact();
+            }
             if (hits >= _confirm_move) {
                 search.clear();
                 if (std::fabs(yaw_deg) > _deadband_deg || std::fabs(pitch_deg) > _deadband_deg) {
@@ -487,12 +515,58 @@ static void track(FaceDetector& detector)
     mclog::tagInfo(_tag, "tracking stopped");
 }
 
+/* ----------------------------- Idle face search ---------------------------- */
+
+// Every few minutes while the AVATAR app idles, look for the user for a few seconds (the session's usual
+// search: the front, straight on, a little up and to the sides)
+static std::atomic<bool> _idle_active{false};
+static std::atomic<int> _idle_minutes{0};  // 0 = off
+static std::atomic<int64_t> _next_idle_us{0};
+static constexpr uint32_t _idle_session_ms = 8000;
+
+static void schedule_idle_search(int64_t now)
+{
+    // Spread it out a little (75-125% of the interval) so it does not feel mechanical
+    const int64_t interval = static_cast<int64_t>(_idle_minutes) * 60 * 1000000;
+    _next_idle_us          = now + interval * (75 + esp_random() % 51) / 100;
+}
+
+// Start an idle search when it is due and StackChan is not busy talking / listening / being handled
+static void maybe_idle_search()
+{
+    const int64_t now = esp_timer_get_time();
+    if (!_idle_active || _idle_minutes <= 0 || wanted()) {
+        return;
+    }
+    if (_next_idle_us == 0) {
+        schedule_idle_search(now);
+        return;
+    }
+    if (now < _next_idle_us) {
+        return;
+    }
+    bool idle = !GetHAL().isAudioBusy();
+    if (idle) {
+        LvglLockGuard lock;
+        auto& stackchan = GetStackChan();
+        idle            = stackchan.hasAvatar() && !stackchan.motion().isModifyLocked();
+    }
+    if (!idle) {
+        _next_idle_us = now + 30 * 1000000LL;  // try again shortly
+        return;
+    }
+    mclog::tagInfo(_tag, "idle face search");
+    _until_us = now + static_cast<int64_t>(_idle_session_ms) * 1000;
+    schedule_idle_search(now);
+}
+
 static void face_task(void*)
 {
     std::unique_ptr<FaceDetector> detector;
     bool load_failed = false;
     while (true) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
+        maybe_idle_search();
         if (!wanted()) {
             continue;
         }
@@ -546,6 +620,24 @@ void Hal::trackFaceFor(uint32_t ms)
 {
     _until_us = esp_timer_get_time() + static_cast<int64_t>(ms) * 1000;
     wake_task();
+}
+
+void Hal::setFaceIdleSearch(int intervalMinutes, bool eyeContactMark)
+{
+    if (_idle_minutes != intervalMinutes) {
+        _next_idle_us = 0;  // reschedule from now
+    }
+    _idle_minutes = std::max(intervalMinutes, 0);
+    _eye_mark     = eyeContactMark;
+}
+
+void Hal::setFaceIdleActive(bool active)
+{
+    _idle_active = active;
+    _next_idle_us = 0;
+    if (active) {
+        wake_task();  // the task keeps the idle schedule
+    }
 }
 
 FaceTrackStatus_t Hal::getFaceTrackStatus()

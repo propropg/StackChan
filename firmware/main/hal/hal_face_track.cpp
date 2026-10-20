@@ -51,6 +51,16 @@ static constexpr uint32_t _settle_ms   = 120;  // let the head stop shaking befo
 static constexpr uint32_t _interval_ms = 100;  // pause between detections so the audio task keeps up
 static constexpr int _search_frames    = 2;    // frames to look at each search position before the next
 
+// False hits (a fan grille once became the front, 82 degrees up): a face must be at least this wide (fraction
+// of the frame, about 25 px), seen in consecutive frames within _same_place (0.1 degree) before the head
+// follows it, and a few more before it becomes the conversation front, which never sits higher than
+// _front_pitch_max even though tracking may look further up.
+static constexpr float _min_face_size  = 0.08f;
+static constexpr int _same_place       = 150;
+static constexpr int _confirm_move     = 2;
+static constexpr int _confirm_front    = 3;
+static constexpr int _front_pitch_max  = 600;
+
 // MSR only proposes candidates; MNP (threshold 0.5) decides. The GC0308's flat, low-contrast frames score a
 // clearly visible face around 0.3 in MSR, so its stock 0.5 threshold found nothing.
 static constexpr float _msr_score_thr = 0.25f;
@@ -300,7 +310,7 @@ void Hal::loadFaceFront()
     Settings settings(_settings_ns, false);
     auto& motion = GetStackChan().motion();
     if (settings.GetBool("has_front", false)) {
-        motion.setFront(settings.GetInt("front_yaw", 0), settings.GetInt("front_pitch", 0));
+        motion.setFront(settings.GetInt("front_yaw", 0), std::min<int>(settings.GetInt("front_pitch", 0), _front_pitch_max));
     } else {
         motion.clearFront();
     }
@@ -386,6 +396,7 @@ static void track(FaceDetector& detector)
     size_t search_index = 0;
     int search_frames   = _search_frames;
     move_head(search[0].x, search[0].y, holding_motion);
+    int hits = 0, hit_yaw = 0, hit_pitch = 0;  // consecutive frames with a face, and where it was
     bool seen = false;
     int seen_yaw = 0, seen_pitch = 0;
 
@@ -411,8 +422,11 @@ static void track(FaceDetector& detector)
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
+        // Far-away "faces" are mostly patterns (fan grilles, posters)
+        if (found && face.size < _min_face_size) {
+            found = false;
+        }
         if (found) {
-            search.clear();
             // Image right is StackChan's right (positive yaw); image up is positive pitch
             const float yaw_deg   = face.x * _hfov_deg * 0.5f * _gain;
             const float pitch_deg = -face.y * _vfov_deg * 0.5f * _gain;
@@ -422,15 +436,33 @@ static void track(FaceDetector& detector)
                 auto& motion = GetStackChan().motion();
                 yaw          = std::clamp(motion.getCurrentYawAngle() + static_cast<int>(yaw_deg * 10), -_yaw_limit, _yaw_limit);
                 pitch        = std::clamp(motion.getCurrentPitchAngle() + static_cast<int>(pitch_deg * 10), 0, _pitch_max);
-                motion.setFront(yaw, pitch);
             }
-            seen       = true;
-            seen_yaw   = yaw;
-            seen_pitch = pitch;
-            if (std::fabs(yaw_deg) > _deadband_deg || std::fabs(pitch_deg) > _deadband_deg) {
-                move_head(yaw, pitch, holding_motion);
+            // A single frame can be a false hit; only trust a face seen in consecutive frames at about the
+            // same place
+            hits = (hits > 0 && std::abs(yaw - hit_yaw) <= _same_place && std::abs(pitch - hit_pitch) <= _same_place)
+                       ? hits + 1
+                       : 1;
+            hit_yaw   = yaw;
+            hit_pitch = pitch;
+
+            if (hits >= _confirm_move) {
+                search.clear();
+                if (std::fabs(yaw_deg) > _deadband_deg || std::fabs(pitch_deg) > _deadband_deg) {
+                    move_head(yaw, pitch, holding_motion);
+                }
             }
-        } else if (!search.empty() && --search_frames == 0) {
+            if (hits >= _confirm_front) {
+                seen       = true;
+                seen_yaw   = yaw;
+                seen_pitch = std::min(pitch, _front_pitch_max);
+                LvglLockGuard lock;
+                GetStackChan().motion().setFront(seen_yaw, seen_pitch);
+            }
+        } else {
+            hits = 0;
+        }
+        // Keep looking at a search position while an unconfirmed face is being checked
+        if (hits == 0 && !search.empty() && --search_frames == 0) {
             if (++search_index < search.size()) {
                 search_frames = _search_frames;
                 move_head(search[search_index].x, search[search_index].y, holding_motion);

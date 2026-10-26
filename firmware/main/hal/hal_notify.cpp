@@ -38,6 +38,7 @@ static std::atomic<bool> _active{false};
 static std::mutex _poll_mutex;  // the task and "check now" never poll at the same time
 static std::mutex _status_mutex;
 static NotifyStatus_t _status;
+static std::atomic<int64_t> _meeting_until_us{0};
 
 /* -------------------------------- Settings -------------------------------- */
 
@@ -79,6 +80,28 @@ NotifyStatus_t Hal::getNotifyStatus()
 {
     std::lock_guard<std::mutex> lock(_status_mutex);
     return _status;
+}
+
+/* --------------------------------- Meeting -------------------------------- */
+
+void Hal::setMeetingFor(int seconds)
+{
+    seconds        = std::clamp(seconds, 0, 3600);
+    const bool was = meetingSecondsLeft() > 0;
+    _meeting_until_us = seconds == 0 ? 0 : esp_timer_get_time() + static_cast<int64_t>(seconds) * 1000000;
+    if (was != (seconds > 0)) {
+        mclog::tagInfo(_tag, "meeting {}", seconds > 0 ? "started" : "ended");
+    }
+    // Announce what came in during the meeting right away
+    if (was && seconds == 0 && _task) {
+        xTaskNotifyGive(_task);
+    }
+}
+
+int Hal::meetingSecondsLeft()
+{
+    const int64_t left = _meeting_until_us - esp_timer_get_time();
+    return left > 0 ? static_cast<int>((left + 999999) / 1000000) : 0;
 }
 
 /* ---------------------------------- Poll ---------------------------------- */
@@ -181,6 +204,10 @@ static bool poll(const NotifyConfig_t& config, int& count, std::string& error)
         GetHAL().beginFaceTracking();
     }
     for (const auto& [text, bubble] : items) {
+        if (GetHAL().meetingSecondsLeft() > 0) {
+            mclog::tagInfo(_tag, "a meeting started, the rest stays unread");
+            break;
+        }
         announce(text, bubble);
     }
     if (look) {
@@ -198,6 +225,11 @@ static void notify_task(void*)
 
         const auto config = GetHAL().getNotifyConfig();
         if (!_active || !config.enabled || config.url.empty()) {
+            continue;
+        }
+        if (GetHAL().meetingSecondsLeft() > 0) {
+            // Like quiet hours the relay keeps what is new; the first poll after the meeting reads it out
+            last_poll_us = 0;
             continue;
         }
         const int64_t now = esp_timer_get_time();

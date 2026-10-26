@@ -23,6 +23,7 @@
  *   GET  /api/voicevox/speakers                    -> speaker list (proxied, the key stays on the device)
  *   GET  /api/voicevox/points                      -> {"points":..,"resetInHours":..}
  *   POST /api/notify/check                         -> polls the Gmail / Calendar relay now, {"ok":true,"count":n}
+ *   POST /api/meeting?seconds=60                   a web meeting runs on the PC for N s (0 ends it): polls wait, events only blink
  *   POST /api/face/test?seconds=15                 looks for a face for a while (0 stops); status in GET /api/settings
  *   GET  /api/face/frame.bmp                       -> the camera frame as the face detector sees it
  *   POST /api/action                               body: {"text","emotion","motion","bubble","ledColor","ledBlinks"}
@@ -418,6 +419,7 @@ static esp_err_t handle_status(httpd_req_t* req)
     doc["heap_internal_min"] = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
     doc["heap_internal_max"] = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
     doc["heap_psram"]        = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    doc["meeting_s"]         = GetHAL().meetingSecondsLeft();
     {
         LvglLockGuard lock;
         doc["avatar"] = GetStackChan().hasAvatar();
@@ -955,6 +957,16 @@ static esp_err_t handle_notify_check(httpd_req_t* req)
     return send_json(req, "200 OK", "{\"ok\":true,\"count\":" + std::to_string(count) + "}");
 }
 
+// ?seconds=N: a web meeting is running on the PC for the next N seconds (renewed while it lasts), 0 = it ended
+static esp_err_t handle_meeting(httpd_req_t* req)
+{
+    std::string seconds = get_query_param(req, "seconds");
+    if (!seconds.empty()) {
+        GetHAL().setMeetingFor(atoi(seconds.c_str()));
+    }
+    return send_json(req, "200 OK", "{\"ok\":true,\"meeting\":" + std::to_string(GetHAL().meetingSecondsLeft()) + "}");
+}
+
 /* ------------------------------ Face tracking ----------------------------- */
 
 static void face_status_to_json(ArduinoJson::JsonObject json)
@@ -1225,6 +1237,7 @@ void Hal::startLocalApiService(std::function<void(std::string_view)> onStartLog)
         {.uri = "/api/voicevox/speakers", .method = HTTP_GET, .handler = handle_voicevox_json, .user_ctx = (void*)"speakers"},
         {.uri = "/api/voicevox/points", .method = HTTP_GET, .handler = handle_voicevox_json, .user_ctx = (void*)"points"},
         {.uri = "/api/notify/check", .method = HTTP_POST, .handler = handle_notify_check, .user_ctx = nullptr},
+        {.uri = "/api/meeting", .method = HTTP_POST, .handler = handle_meeting, .user_ctx = nullptr},
         {.uri = "/api/face/test", .method = HTTP_POST, .handler = handle_face_test, .user_ctx = nullptr},
         {.uri = "/api/face/frame.bmp", .method = HTTP_GET, .handler = handle_face_frame, .user_ctx = nullptr},
         {.uri = "/api/action", .method = HTTP_POST, .handler = handle_action, .user_ctx = nullptr},

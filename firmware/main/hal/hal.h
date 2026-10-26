@@ -355,6 +355,11 @@ public:
     void setNotifyActive(bool active);
     // Poll right now regardless of the interval / quiet hours; speaks what it finds. Blocks.
     bool checkNotificationsNow(int& count, std::string& error);
+    // A web meeting is running on the PC (tools: stackchan-meeting.ps1 sees the microphone in use). Polls are
+    // put off and Claude Code events only blink and show their bubble until it ends. The PC renews it while
+    // the meeting lasts, so it times out by itself when the PC goes away; 0 ends it now.
+    void setMeetingFor(int seconds);
+    int meetingSecondsLeft();
 
     /* ------------------------------ Face tracking ----------------------------- */
     // Turn the head toward a face seen by the camera (ESP-DL, models in the assets partition) while held.

@@ -24,6 +24,7 @@ static const std::string_view _tag = "Action";
 static const char* _settings_ns        = "events";
 static constexpr uint32_t _slice_ms    = 250;
 static const char* _led_off_json       = R"({"leftRgbColor":"#000000","rightRgbColor":"#000000"})";
+static constexpr uint32_t _meeting_bubble_ms = 15000;
 
 /* --------------------------------- Motion --------------------------------- */
 
@@ -225,12 +226,27 @@ bool Hal::runEvent(std::string_view name, std::string_view session, std::string&
         error = "unknown event";
         return false;
     }
+    Action_t action = load_event(name);
+    if (meetingSecondsLeft() > 0) {
+        // No voice and no servo noise during a web meeting: blink and show the bubble only. This counts as
+        // done, so the PC hook does not fall back to its own voice.
+        mclog::tagInfo(_tag, "event {} during a meeting: bubble only", name);
+        if (!action.bubble.empty()) {
+            LvglLockGuard lock;
+            auto& stackchan = GetStackChan();
+            if (stackchan.hasAvatar()) {
+                stackchan.addModifier(std::make_unique<TimedSpeechModifier>(action.bubble, _meeting_bubble_ms));
+            }
+        }
+        action.text.clear();
+        action.motion = "none";
+        return runAction(action, error);
+    }
     if (!getVoicevoxConfig().enabled) {
         // The hook falls back to the PC voice
         error = "voicevox disabled";
         return false;
     }
-    Action_t action = load_event(name);
     if (auto pos = action.text.find("{session}"); pos != std::string::npos) {
         action.text.replace(pos, 9, session);
     }

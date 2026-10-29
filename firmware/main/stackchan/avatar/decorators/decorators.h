@@ -213,4 +213,35 @@ private:
     bool _dim                = false;
 };
 
+/**
+ * @brief Digital clock (HH:MM, seven-segment style) at the top of the face, above the eyes. Stays until removed.
+ *
+ */
+class ClockDecorator : public Decorator {
+public:
+    /**
+     * @param parent
+     * @param align LV_ALIGN_TOP_LEFT, LV_ALIGN_TOP_MID or LV_ALIGN_TOP_RIGHT
+     * @param digitHeight Digit height in pixels (keep it under ~60 so the clock stays above the eyes)
+     */
+    ClockDecorator(lv_obj_t* parent, lv_align_t align = LV_ALIGN_TOP_MID, int digitHeight = 50);
+    ~ClockDecorator();
+
+    void _update() override;
+    void setVisible(bool visible) override;
+
+private:
+    static constexpr int _digit_count   = 4;
+    static constexpr int _segment_count = 7;
+
+    lv_obj_t* _panel = nullptr;
+    lv_obj_t* _segments[_digit_count][_segment_count] = {};
+    lv_obj_t* _colon[2]                                 = {};
+
+    int _shown_minute = -2;  // -1 = clock not set yet ("--:--")
+    int _shown_second = -1;
+
+    void show_digit(int index, int value);
+};
+
 }  // namespace stackchan::avatar

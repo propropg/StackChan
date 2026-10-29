@@ -273,6 +273,15 @@
       <option value="EST5EDT,M3.2.0,M11.1.0">米国東部</option><option value="PST8PDT,M3.2.0,M11.1.0">米国西部</option>
       <option value="CET-1CEST,M3.5.0,M10.5.0/3">中央ヨーロッパ</option>
     </select>
+    <div class="toggle" style="margin-top:8px"><span>アバター画面の上に時計を表示</span><input type="checkbox" data-idle="avatarClock"></div>
+    <label>時計の位置</label>
+    <select id="clockAlign">
+      <option value="left">左寄せ</option><option value="center">中央</option><option value="right">右寄せ</option>
+    </select>
+    <label>時計の大きさ</label>
+    <select id="clockSize">
+      <option value="small">小</option><option value="medium">中</option><option value="large">大</option>
+    </select>
   </div>
   <div class="card">
     <h2>待機中の動き</h2>
@@ -547,6 +556,8 @@ function showSettings(s) {
   $("bri").value = s.brightness; $("briVal").textContent = s.brightness;
   if ([...$("tz").options].some((o) => o.value === s.timezone)) $("tz").value = s.timezone;
   $("idleLevel").value = s.idleMotionLevel;
+  $("clockAlign").value = s.avatarClockAlign || "center";
+  $("clockSize").value = s.avatarClockSize || "medium";
   $("faceSearchMin").value = String(s.faceSearchMin ?? 3);
   if (!$("faceSearchMin").value) $("faceSearchMin").add(new Option(s.faceSearchMin + "分くらいおき", String(s.faceSearchMin), true, true));
   document.querySelectorAll("[data-idle]").forEach((c) => c.checked = !!s[c.dataset.idle]);
@@ -714,6 +725,8 @@ $("vol").oninput = () => { $("volVal").textContent = $("vol").value; saveDevice(
 $("bri").oninput = () => { $("briVal").textContent = $("bri").value; saveDevice({ brightness: +$("bri").value }); };
 $("tz").onchange = () => saveDevice({ timezone: $("tz").value });
 $("idleLevel").onchange = () => saveDevice({ idleMotionLevel: +$("idleLevel").value });
+$("clockAlign").onchange = () => saveDevice({ avatarClockAlign: $("clockAlign").value });
+$("clockSize").onchange = () => saveDevice({ avatarClockSize: $("clockSize").value });
 $("faceSearchMin").onchange = () => saveDevice({ faceSearchMin: +$("faceSearchMin").value });
 document.querySelectorAll("[data-idle]").forEach((c) => c.onchange = () => saveDevice({ [c.dataset.idle]: c.checked }));
 $("servoOn").onclick = () => run($("servoOn"), () => post("/api/servo", { power: true }), "サーボをオンにしました");

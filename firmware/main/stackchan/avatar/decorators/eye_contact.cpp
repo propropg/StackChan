@@ -9,7 +9,7 @@ using namespace stackchan::avatar;
 
 static constexpr int _badge_size          = 40;
 static constexpr int _badge_x             = 14;
-static constexpr int _badge_y             = 34;  // below the status bar
+static constexpr int _badge_y             = 72;  // beside the left eye, clear of the clock
 static constexpr uint32_t _blink_interval = 400;
 static const lv_color_t _badge_color      = lv_color_hex(0xFFD54A);
 static const lv_color_t _icon_color       = lv_color_hex(0x3A2A00);

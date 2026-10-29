@@ -594,7 +594,13 @@ struct IdleSettings {
     bool imu        = true;
     int faceSearchMin   = 3;     // look for the user every few minutes, 0 = never
     bool eyeContactMark = true;  // badge on the face when the user is found
+    bool avatarClock    = true;  // digital clock at the top of the face
+    int clockAlign      = 1;     // 0 left, 1 center, 2 right
+    int clockSize       = 1;     // 0 small, 1 medium, 2 large
 };
+
+static const char* const _clock_align_names[] = {"left", "center", "right"};
+static const char* const _clock_size_names[]  = {"small", "medium", "large"};
 
 static IdleSettings load_idle_settings()
 {
@@ -608,6 +614,9 @@ static IdleSettings load_idle_settings()
     out.imu        = settings.GetBool("idle_imu", true);
     out.faceSearchMin  = settings.GetInt("idle_face_min", out.faceSearchMin);
     out.eyeContactMark = settings.GetBool("idle_eye_mark", out.eyeContactMark);
+    out.avatarClock    = settings.GetBool("avatar_clock", out.avatarClock);
+    out.clockAlign     = std::clamp<int>(settings.GetInt("clock_align", out.clockAlign), 0, 2);
+    out.clockSize      = std::clamp<int>(settings.GetInt("clock_size", out.clockSize), 0, 2);
     return out;
 }
 
@@ -626,9 +635,16 @@ static void save_idle_settings(const IdleSettings& idle)
     settings.SetBool("idle_imu", idle.imu);
     settings.SetInt("idle_face_min", idle.faceSearchMin);
     settings.SetBool("idle_eye_mark", idle.eyeContactMark);
+    settings.SetBool("avatar_clock", idle.avatarClock);
+    settings.SetInt("clock_align", idle.clockAlign);
+    settings.SetInt("clock_size", idle.clockSize);
 }
 
 static std::vector<int> _idle_modifier_ids;
+
+// Clock decorator id, together with the avatar it was added to (a new avatar starts with no decorators)
+static int _clock_decorator_id   = -1;
+static const void* _clock_avatar = nullptr;
 
 void Hal::applyIdleModifiers()
 {
@@ -657,6 +673,20 @@ void Hal::applyIdleModifiers()
         default: break;
     }
     setFaceIdleSearch(idle.faceSearchMin, idle.eyeContactMark);
+
+    auto& face = stackchan.avatar();
+    if (_clock_avatar == &face && _clock_decorator_id >= 0) {
+        face.removeDecorator(_clock_decorator_id);
+    }
+    _clock_decorator_id = -1;
+    if (idle.avatarClock) {
+        const lv_align_t clock_align[] = {LV_ALIGN_TOP_LEFT, LV_ALIGN_TOP_MID, LV_ALIGN_TOP_RIGHT};
+        const int clock_height[]       = {36, 50, 60};
+        _clock_decorator_id            = face.addDecorator(std::make_unique<avatar::ClockDecorator>(
+            lv_screen_active(), clock_align[idle.clockAlign], clock_height[idle.clockSize]));
+    }
+    _clock_avatar = &face;
+
     mclog::tagInfo(_tag, "idle modifiers applied: motion level {}, {} modifiers", idle.motionLevel,
                    _idle_modifier_ids.size());
 }
@@ -681,6 +711,9 @@ static esp_err_t handle_get_settings(httpd_req_t* req)
     doc["imu"]             = idle.imu;
     doc["faceSearchMin"]   = idle.faceSearchMin;
     doc["eyeContactMark"]  = idle.eyeContactMark;
+    doc["avatarClock"]     = idle.avatarClock;
+    doc["avatarClockAlign"] = _clock_align_names[idle.clockAlign];
+    doc["avatarClockSize"]  = _clock_size_names[idle.clockSize];
 
     // The API key itself never leaves the device; only whether it is set and its last characters
     const auto voicevox       = GetHAL().getVoicevoxConfig();
@@ -813,6 +846,21 @@ static esp_err_t handle_post_settings(httpd_req_t* req)
     read_bool("headPet", idle.headPet);
     read_bool("imu", idle.imu);
     read_bool("eyeContactMark", idle.eyeContactMark);
+    read_bool("avatarClock", idle.avatarClock);
+    auto read_choice = [&](const char* key, const char* const (&names)[3], int& target) {
+        if (!doc[key].is<const char*>()) {
+            return;
+        }
+        const std::string_view name = doc[key].as<const char*>();
+        for (int i = 0; i < 3; i++) {
+            if (name == names[i]) {
+                target       = i;
+                idle_changed = true;
+            }
+        }
+    };
+    read_choice("avatarClockAlign", _clock_align_names, idle.clockAlign);
+    read_choice("avatarClockSize", _clock_size_names, idle.clockSize);
     if (doc["faceSearchMin"].is<int>()) {
         idle.faceSearchMin = std::clamp(doc["faceSearchMin"].as<int>(), 0, 60);
         idle_changed       = true;

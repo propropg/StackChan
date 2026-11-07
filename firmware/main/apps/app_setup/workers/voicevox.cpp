@@ -110,7 +110,7 @@ VoicevoxWorker::VoicevoxWorker()
     _switch_enabled->setSize(64, 36);
     _switch_enabled->align(LV_ALIGN_TOP_MID, 0, 56);
     _switch_enabled->setBgColor(lv_color_hex(0xB8D3FD), LV_PART_MAIN);
-    _switch_enabled->setBgColor(lv_color_hex(0x615B9E), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    _switch_enabled->setBgColor(lv_color_hex(0x615B9E), static_cast<lv_style_selector_t>(LV_PART_INDICATOR) | LV_STATE_CHECKED);
     _switch_enabled->setBgColor(lv_color_hex(0xFFFFFF), LV_PART_KNOB);
     if (_config.enabled) {
         _switch_enabled->addState(LV_STATE_CHECKED);

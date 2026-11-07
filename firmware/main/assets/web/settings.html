@@ -84,6 +84,7 @@
   <button data-tab="say" class="active">話す</button>
   <button data-tab="move">動き</button>
   <button data-tab="face">表情・LED</button>
+  <button data-tab="ai">AI会話</button>
   <button data-tab="voice">声</button>
   <button data-tab="notify">通知</button>
   <button data-tab="device">本体設定</button>
@@ -209,6 +210,92 @@
       <button class="b" id="vvPoints">残りポイントを確認</button>
     </div>
     <p class="hint" id="vvPointsText">1回あたり 1500 + 100 × 文字数（UTF-8のバイト数）ポイントを使います。1日の上限はおよそ 1,000 万ポイントです。</p>
+  </div>
+</section>
+
+<!-- AI会話 -->
+<section id="ai">
+  <div class="card">
+    <h2>AI と会話する</h2>
+    <div class="toggle"><span>顔をタップして話しかける</span><input type="checkbox" id="aiEnabled"></div>
+    <p class="hint">AVATAR 画面で顔をタップすると「きいてるよ…」と出るので、そのまま話しかけてください。話し終わって 1 秒ほど静かになると、AI の返事を VOICEVOX でしゃべります。</p>
+
+    <label>会話に使う AI</label>
+    <select id="aiProvider">
+      <option value="gemini">Gemini（無料枠あり・おすすめ）</option>
+      <option value="openai">ChatGPT（OpenAI・有料）</option>
+      <option value="claude">Claude（Anthropic・有料）</option>
+    </select>
+    <p class="hint">声の聞き取りは、Gemini のキーがあれば常に Gemini（無料枠）で行います。Gemini だけなら 1 回の会話につき 1 リクエストです。ChatGPT / Claude は API の利用料がかかります。</p>
+  </div>
+
+  <div class="card">
+    <h2>Gemini</h2>
+    <label>API キー</label>
+    <div class="keyline">
+      <input type="password" id="aiGeminiKey" autocomplete="off" placeholder="未設定">
+      <button type="button" class="b" data-clear="gemini">削除</button>
+    </div>
+    <p class="hint"><a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> で無料で発行できます（請求先を設定しないプロジェクトなら課金されません）。無料枠の回数はモデルごとに決まっていて、Flash-Lite 系が多めです。</p>
+    <label>モデル</label>
+    <input type="text" id="aiGeminiModel" spellcheck="false" list="aiGeminiModels">
+    <datalist id="aiGeminiModels"><option value="gemini-3.5-flash-lite"><option value="gemini-3.1-flash-lite"><option value="gemini-3.8-flash"><option value="gemini-2.5-flash-lite"><option value="gemini-2.5-flash"></datalist>
+  </div>
+
+  <div class="card">
+    <h2>ChatGPT（OpenAI）</h2>
+    <label>API キー</label>
+    <div class="keyline">
+      <input type="password" id="aiOpenaiKey" autocomplete="off" placeholder="未設定">
+      <button type="button" class="b" data-clear="openai">削除</button>
+    </div>
+    <p class="hint"><a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">platform.openai.com</a> で発行します（従量課金）。Gemini のキーがないときは、聞き取りも OpenAI で行います。</p>
+    <label>モデル</label>
+    <input type="text" id="aiOpenaiModel" spellcheck="false">
+  </div>
+
+  <div class="card">
+    <h2>Claude（Anthropic）</h2>
+    <label>API キー</label>
+    <div class="keyline">
+      <input type="password" id="aiClaudeKey" autocomplete="off" placeholder="未設定">
+      <button type="button" class="b" data-clear="claude">削除</button>
+    </div>
+    <p class="hint"><a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a> で発行します（従量課金）。Claude は音声を聞けないので、聞き取りには Gemini のキーも必要です。</p>
+    <label>モデル</label>
+    <input type="text" id="aiClaudeModel" spellcheck="false">
+  </div>
+
+  <div class="card">
+    <h2>キャラクターと会話の記憶</h2>
+    <label>キャラクター設定（システムプロンプト）</label>
+    <textarea id="aiPrompt" rows="5"></textarea>
+    <label>天気を調べる場所</label>
+    <div class="keyline">
+      <input type="text" id="aiWxQuery" placeholder="例: Yokohama / 横浜市（ローマ字が確実）">
+      <button type="button" class="b" id="aiWxSearch">検索</button>
+    </div>
+    <select id="aiWxPick" style="margin-top:6px"><option value="">（設定なし）</option></select>
+    <p class="hint">天気は Open-Meteo（無料・キー不要）から取って AI に渡します。現在の日時は本体の時計から渡します。</p>
+    <label>覚えておく会話 <span class="val" id="aiHistoryVal"></span> 往復</label>
+    <input type="range" id="aiHistory" min="0" max="20" step="1">
+    <div class="btns">
+      <button class="b primary" id="aiSave">保存</button>
+      <button class="b" id="aiReset">会話の記憶を消す</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>試してみる</h2>
+    <label>文字で話しかける</label>
+    <input type="text" id="aiText" placeholder="例: 今日のおすすめの晩ごはんは？" maxlength="300">
+    <div class="btns">
+      <button class="b primary" id="aiSend">保存して送る</button>
+      <button class="b" id="aiListen">マイクで話しかける</button>
+      <button class="b" id="aiLastRec">最後の録音を聞く</button>
+    </div>
+    <audio id="aiAudio" controls style="width:100%;margin-top:8px;display:none"></audio>
+    <p class="hint" id="aiLog"></p>
   </div>
 </section>
 
@@ -343,10 +430,17 @@ const ERROR_TEXT = {
   failed: "VOICEVOX での音声合成に失敗しました",
   "Wi-Fi not connected": "Wi-Fi につながっていません",
   "voicevox disabled": "「声」タブで VOICEVOX がオフになっています",
+  "gemini key not set": "Gemini の API キーを設定してください",
+  "openai key not set": "OpenAI の API キーを設定してください",
+  "claude key not set": "Claude の API キーを設定してください",
+  "ai chat disabled": "「顔をタップして話しかける」がオフになっています",
+  busy: "いま会話中です。少し待ってください",
+  "no speech": "うまく聞き取れませんでした",
 };
 
 let settings = null;  // last GET /api/settings
 let clearKey = false, clearUrl = false;
+let clearAiKeys = {};
 
 function toast(msg) {
   const t = $("toast"); t.textContent = msg; t.classList.add("show");
@@ -405,7 +499,7 @@ $("tabs").addEventListener("click", (e) => {
   document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   document.querySelectorAll("section").forEach((s) => s.classList.toggle("active", s.id === tab));
   try { localStorage.setItem("tab", tab); } catch (e) {}
-  if (tab === "device" || tab === "notify") loadSettings();
+  if (tab === "device" || tab === "notify" || tab === "ai") loadSettings();
 });
 
 // ---- status ----
@@ -551,6 +645,23 @@ function showSettings(s) {
   $("ntFaceStatus").textContent = faceStatusText(s.face);
   $("ntQuietStart").value = String(nt.quietStart); $("ntQuietEnd").value = String(nt.quietEnd);
   $("ntStatus").textContent = notifyStatusText(nt);
+  // AI chat
+  const ac = s.aiChat || {};
+  $("aiEnabled").checked = !!ac.enabled;
+  $("aiProvider").value = ac.provider || "gemini";
+  for (const [name, id] of [["gemini", "aiGeminiKey"], ["openai", "aiOpenaiKey"], ["claude", "aiClaudeKey"]]) {
+    $(id).value = "";
+    $(id).placeholder = ac[name + "KeySet"] ? "設定済み（末尾 " + ac[name + "KeyHint"] + "）" : "未設定";
+  }
+  clearAiKeys = {};
+  $("aiGeminiModel").value = ac.geminiModel || "";
+  $("aiOpenaiModel").value = ac.openaiModel || "";
+  $("aiClaudeModel").value = ac.claudeModel || "";
+  $("aiPrompt").value = ac.systemPrompt || "";
+  const pick = $("aiWxPick");
+  pick.innerHTML = '<option value="">（設定なし）</option>';
+  if (ac.weatherName) pick.add(new Option(ac.weatherName, JSON.stringify({ n: ac.weatherName, la: ac.weatherLat, lo: ac.weatherLon }), true, true));
+  $("aiHistory").value = ac.historyTurns ?? 6; $("aiHistoryVal").textContent = $("aiHistory").value;
   // Device
   $("vol").value = s.volume; $("volVal").textContent = s.volume;
   $("bri").value = s.brightness; $("briVal").textContent = s.brightness;
@@ -714,6 +825,60 @@ $("ntFaceTest").onclick = () => run($("ntFaceTest"), async () => {
     await new Promise((r) => { frame.onload = frame.onerror = r; frame.src = "/api/face/frame.bmp?t=" + Date.now(); });
   }
 });
+
+// ---- AI chat ----
+function collectAi() {
+  const aiChat = {
+    enabled: $("aiEnabled").checked, provider: $("aiProvider").value,
+    geminiModel: $("aiGeminiModel").value.trim(), openaiModel: $("aiOpenaiModel").value.trim(),
+    claudeModel: $("aiClaudeModel").value.trim(), systemPrompt: $("aiPrompt").value.trim(), historyTurns: +$("aiHistory").value,
+  };
+  const wx = $("aiWxPick").value ? JSON.parse($("aiWxPick").value) : { n: "", la: 0, lo: 0 };
+  aiChat.weatherName = wx.n; aiChat.weatherLat = wx.la; aiChat.weatherLon = wx.lo;
+  for (const [name, id] of [["gemini", "aiGeminiKey"], ["openai", "aiOpenaiKey"], ["claude", "aiClaudeKey"]]) {
+    const key = $(id).value.trim();
+    if (key) aiChat[name + "Key"] = key; else if (clearAiKeys[name]) aiChat[name + "Key"] = "";
+  }
+  return aiChat;
+}
+const saveAi = () => saveSettings({ aiChat: collectAi() });
+$("aiWxSearch").onclick = () => run($("aiWxSearch"), async () => {
+  const q = $("aiWxQuery").value.trim();
+  if (!q) throw new Error("地名を入れてください");
+  const res = await fetch("https://geocoding-api.open-meteo.com/v1/search?count=10&language=ja&name=" + encodeURIComponent(q));
+  const list = (await res.json()).results || [];
+  if (!list.length) throw new Error("見つかりませんでした。ローマ字（例: Yokohama）で試してください");
+  const pick = $("aiWxPick");
+  pick.innerHTML = '<option value="">（設定なし）</option>';
+  for (const r of list) {
+    const label = [r.name, r.admin1, r.country].filter(Boolean).join("・");
+    pick.add(new Option(label, JSON.stringify({ n: r.name, la: r.latitude, lo: r.longitude })));
+  }
+  pick.selectedIndex = 1;
+}, "候補から選んで「保存」してください");
+document.querySelectorAll("[data-clear]").forEach((b) => b.onclick = () => {
+  const name = b.dataset.clear, input = b.previousElementSibling;
+  clearAiKeys[name] = true; input.value = ""; input.placeholder = "未設定（保存すると削除）";
+});
+$("aiHistory").oninput = () => { $("aiHistoryVal").textContent = $("aiHistory").value; };
+$("aiSave").onclick = () => run($("aiSave"), saveAi, "保存しました");
+$("aiReset").onclick = () => run($("aiReset"), () => post("/api/chat/reset"), "会話の記憶を消しました");
+$("aiSend").onclick = () => run($("aiSend"), async () => {
+  const text = $("aiText").value.trim();
+  if (!text) throw new Error("話しかける文を入れてください");
+  await saveAi();
+  $("aiLog").textContent = "考え中…";
+  try {
+    const r = await post("/api/chat", { text });
+    $("aiLog").textContent = "スタックチャン: " + r.reply;
+    $("aiText").value = "";
+  } catch (e) { $("aiLog").textContent = ""; throw e; }
+});
+$("aiLastRec").onclick = () => { const a = $("aiAudio"); a.style.display = ""; a.src = "/api/chat/last.wav?t=" + Date.now(); a.play().catch(() => {}); };
+$("aiListen").onclick = () => run($("aiListen"), async () => {
+  await saveAi();
+  await post("/api/chat/listen");
+}, "スタックチャンに話しかけてください");
 
 // ---- device ----
 let deviceTimer = null;

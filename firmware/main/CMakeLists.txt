@@ -310,6 +310,7 @@ idf_component_register(SRCS ${SOURCES}
                         esp_app_format
                         app_update
                         spi_flash
+                        espcoredump
                         console
                         efuse
                         bt

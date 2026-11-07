@@ -30,6 +30,10 @@
  *   GET  /api/events                               -> Claude Code event templates (stop / notification / sessionEnd)
  *   POST /api/events                               body: any of the templates above (saved to flash)
  *   POST /api/event?name=stop&session=..           runs a template; 409 when VOICEVOX is off (the hook falls back)
+ *   POST /api/chat                                 body: {"text":".."} -> AI reply (spoken), {"heard","reply","emotion"}
+ *   POST /api/chat/listen                          listen on the mic and answer (same as tapping the face)
+ *   POST /api/chat/reset                           forget the conversation so far
+ *   GET  /api/chat/last.wav                        the last mic recording (to check what StackChan heard)
  *
  * /api/say voices: text only -> cloud VOICEVOX. Text + WAV -> VOICEVOX when enabled in settings, the WAV
  * when VOICEVOX is disabled or fails (add voice=wav to always use the WAV).
@@ -40,6 +44,7 @@
 #include <stackchan/stackchan.h>
 #include <mooncake_log.h>
 #include <board.h>
+#include "board/hal_bridge.h"
 #include <audio/audio_codec.h>
 #include <esp_http_server.h>
 #include <esp_netif.h>
@@ -56,6 +61,9 @@
 #include <cstring>
 #include <mutex>
 #include <new>
+#include <esp_core_dump.h>
+#include <esp_memory_utils.h>
+#include <esp_flash.h>
 #include <string>
 #include <vector>
 
@@ -355,6 +363,11 @@ static const char* play_wav(const uint8_t* buf, size_t len, const std::string& t
     return nullptr;
 }
 
+std::mutex& Hal::audioMutex()
+{
+    return _audio_mutex;
+}
+
 bool Hal::isAudioBusy()
 {
     if (!_audio_mutex.try_lock()) {
@@ -419,6 +432,29 @@ static esp_err_t handle_status(httpd_req_t* req)
     doc["heap_internal_min"] = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
     doc["heap_internal_max"] = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
     doc["heap_psram"]        = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    {
+        uint8_t on = 0, off = 0;
+        hal_bridge::board_get_pmic_power_status(on, off);
+        doc["pmic_on"]  = fmt::format("0x{:02X}", on);   // AXP2101 reg 0x20: what powered the system on
+        doc["pmic_off"] = fmt::format("0x{:02X}", off);  // AXP2101 reg 0x21: what powered it off last time
+        int vbat = 0, vbus = 0, vsys = 0, temp = 0;
+        if (hal_bridge::board_get_power_readings(vbat, vbus, vsys, temp)) {
+            doc["vbat_mv"]   = vbat;
+            doc["vbus_mv"]   = vbus;
+            doc["vsys_mv"]   = vsys;
+            doc["pmic_temp"] = temp / 10.0;
+        }
+        uint8_t limit_boot = 0, limit_now = 0;
+        hal_bridge::board_get_pmic_vbus_limit(limit_boot, limit_now);
+        doc["vbus_limit"] = fmt::format("0x{:02X}->0x{:02X}", limit_boot, limit_now);  // AXP2101 reg 0x16
+        uint8_t uvp_boot = 0, uvp_now = 0;
+        hal_bridge::board_get_pmic_uvp_ctrl(uvp_boot, uvp_now);
+        doc["uvp_ctrl"] = fmt::format("0x{:02X}->0x{:02X}", uvp_boot, uvp_now);  // AXP2101 reg 0x23
+        uint8_t st1 = 0, st2 = 0;
+        hal_bridge::board_get_pmic_status(st1, st2);
+        doc["pmic_status"]  = fmt::format("0x{:02X} 0x{:02X}", st1, st2);  // AXP2101 regs 0x00, 0x01
+        doc["bat_present"]  = (st1 & 0x08) != 0;
+    }
     doc["meeting_s"]         = GetHAL().meetingSecondsLeft();
     {
         LvglLockGuard lock;
@@ -745,6 +781,28 @@ static esp_err_t handle_get_settings(httpd_req_t* req)
     nt["lastError"]      = nstatus.lastError;
     face_status_to_json(doc["face"].to<ArduinoJson::JsonObject>());
 
+    // API keys never leave the device; only whether they are set and their last characters
+    const auto ai  = GetHAL().getAiChatConfig();
+    auto key_hint  = [](const std::string& key) { return key.size() > 4 ? key.substr(key.size() - 4) : std::string(); };
+    auto ac        = doc["aiChat"].to<ArduinoJson::JsonObject>();
+    ac["enabled"]      = ai.enabled;
+    ac["provider"]     = ai.provider;
+    ac["geminiKeySet"] = !ai.geminiKey.empty();
+    ac["geminiKeyHint"] = key_hint(ai.geminiKey);
+    ac["geminiModel"]  = ai.geminiModel;
+    ac["openaiKeySet"] = !ai.openaiKey.empty();
+    ac["openaiKeyHint"] = key_hint(ai.openaiKey);
+    ac["openaiModel"]  = ai.openaiModel;
+    ac["claudeKeySet"] = !ai.claudeKey.empty();
+    ac["claudeKeyHint"] = key_hint(ai.claudeKey);
+    ac["claudeModel"]  = ai.claudeModel;
+    ac["systemPrompt"] = ai.systemPrompt;
+    ac["historyTurns"] = ai.historyTurns;
+    ac["weatherName"]  = ai.weatherName;
+    ac["weatherLat"]   = ai.weatherLat;
+    ac["weatherLon"]   = ai.weatherLon;
+    ac["busy"]         = GetHAL().isAiChatBusy();
+
     auto info         = doc["device"].to<ArduinoJson::JsonObject>();
     info["ip"]        = GetHAL().getLocalIp();
     info["firmware"]  = esp_app_get_description()->version;
@@ -826,6 +884,25 @@ static esp_err_t handle_post_settings(httpd_req_t* req)
     }
     if (doc["face"]["resetFront"].as<bool>()) {
         GetHAL().resetFaceFront();
+    }
+
+    if (auto ac = doc["aiChat"]; ac.is<ArduinoJson::JsonObject>()) {
+        auto ai = GetHAL().getAiChatConfig();
+        if (ac["enabled"].is<bool>()) ai.enabled = ac["enabled"].as<bool>();
+        if (ac["provider"].is<const char*>()) ai.provider = ac["provider"].as<std::string>();
+        // "" clears a key
+        if (ac["geminiKey"].is<const char*>()) ai.geminiKey = ac["geminiKey"].as<std::string>();
+        if (ac["openaiKey"].is<const char*>()) ai.openaiKey = ac["openaiKey"].as<std::string>();
+        if (ac["claudeKey"].is<const char*>()) ai.claudeKey = ac["claudeKey"].as<std::string>();
+        if (ac["geminiModel"].is<const char*>()) ai.geminiModel = ac["geminiModel"].as<std::string>();
+        if (ac["openaiModel"].is<const char*>()) ai.openaiModel = ac["openaiModel"].as<std::string>();
+        if (ac["claudeModel"].is<const char*>()) ai.claudeModel = ac["claudeModel"].as<std::string>();
+        if (ac["systemPrompt"].is<const char*>()) ai.systemPrompt = ac["systemPrompt"].as<std::string>();
+        if (ac["historyTurns"].is<int>()) ai.historyTurns = ac["historyTurns"].as<int>();
+        if (ac["weatherName"].is<const char*>()) ai.weatherName = ac["weatherName"].as<std::string>();  // "" = none
+        if (ac["weatherLat"].is<float>()) ai.weatherLat = ac["weatherLat"].as<float>();
+        if (ac["weatherLon"].is<float>()) ai.weatherLon = ac["weatherLon"].as<float>();
+        GetHAL().setAiChatConfig(ai);
     }
 
     auto idle         = load_idle_settings();
@@ -1067,6 +1144,60 @@ static esp_err_t handle_face_frame(httpd_req_t* req)
     return httpd_resp_send(req, reinterpret_cast<const char*>(bmp.data()), bmp.size());
 }
 
+/* --------------------------------- AI chat -------------------------------- */
+
+static esp_err_t handle_chat(httpd_req_t* req)
+{
+    ArduinoJson::JsonDocument doc;
+    if (!read_json_body(req, doc)) {
+        return ESP_OK;
+    }
+    AiChatResult_t result;
+    std::string error;
+    if (!GetHAL().aiChatText(doc["text"].as<std::string>(), result, error)) {
+        const char* status = error == "busy" ? "409 Conflict"
+                             : error == "empty text" || error.find("key not set") != std::string::npos
+                                 ? "400 Bad Request"
+                                 : "502 Bad Gateway";
+        return send_error(req, status, error);
+    }
+    ArduinoJson::JsonDocument out;
+    out["ok"]      = true;
+    out["heard"]   = result.heard;
+    out["reply"]   = result.reply;
+    out["emotion"] = result.emotion;
+    std::string json;
+    ArduinoJson::serializeJson(out, json);
+    return send_json(req, "200 OK", json);
+}
+
+static esp_err_t handle_chat_listen(httpd_req_t* req)
+{
+    if (!GetHAL().getAiChatConfig().enabled) {
+        return send_error(req, "409 Conflict", "ai chat disabled");
+    }
+    if (!GetHAL().requestAiChatListen()) {
+        return send_error(req, "409 Conflict", "busy");
+    }
+    return send_ok(req);
+}
+
+static esp_err_t handle_chat_last_wav(httpd_req_t* req)
+{
+    PsramBytes wav;
+    if (!GetHAL().getAiChatLastRecording(wav)) {
+        return send_error(req, "404 Not Found", "no recording yet");
+    }
+    httpd_resp_set_type(req, "audio/wav");
+    return httpd_resp_send(req, reinterpret_cast<const char*>(wav.data()), wav.size());
+}
+
+static esp_err_t handle_chat_reset(httpd_req_t* req)
+{
+    GetHAL().clearAiChatHistory();
+    return send_ok(req);
+}
+
 /* ------------------------------ Settings page ----------------------------- */
 
 extern const uint8_t _settings_html_start[] asm("_binary_settings_html_start");
@@ -1090,6 +1221,51 @@ static esp_err_t handle_reboot(httpd_req_t* req)
     send_ok(req);
     xTaskCreate(reboot_task, "reboot", 2048, nullptr, 5, nullptr);
     return ESP_OK;
+}
+
+// The core dump left in flash by the last crash (ELF), to decode on the PC with the matching firmware ELF:
+//   curl -o core.elf http://stackchan.local/api/coredump
+//   python -m esp_coredump info_corefile -t elf -c core.elf build/stack-chan.elf
+static esp_err_t handle_coredump(httpd_req_t* req)
+{
+    size_t addr = 0, size = 0;
+    if (esp_core_dump_image_check() != ESP_OK || esp_core_dump_image_get(&addr, &size) != ESP_OK || size == 0) {
+        return send_error(req, "404 Not Found", "no core dump");
+    }
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"core.elf\"");
+    std::vector<uint8_t> chunk(4096);
+    for (size_t off = 0; off < size; off += chunk.size()) {
+        size_t n = std::min(chunk.size(), size - off);
+        if (esp_flash_read(nullptr, chunk.data(), addr + off, n) != ESP_OK ||
+            httpd_resp_send_chunk(req, reinterpret_cast<const char*>(chunk.data()), n) != ESP_OK) {
+            httpd_resp_send_chunk(req, nullptr, 0);
+            return ESP_FAIL;
+        }
+    }
+    return httpd_resp_send_chunk(req, nullptr, 0);
+}
+
+// Internal RAM headroom and where each task's stack lives (internal RAM or PSRAM), to see what eats internal RAM
+static esp_err_t handle_debug_heap(httpd_req_t* req)
+{
+    std::string out = fmt::format("internal free {}, min {}, largest {}\npsram free {}\n\n",
+                                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                                  heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                                  heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                                  heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    UBaseType_t count = uxTaskGetNumberOfTasks() + 4;
+    std::vector<TaskStatus_t> tasks(count);
+    count = uxTaskGetSystemState(tasks.data(), count, nullptr);
+    out += "task              stack   prio  min free stack\n";
+    for (UBaseType_t i = 0; i < count; i++) {
+        const auto& t = tasks[i];
+        bool psram    = esp_ptr_external_ram(pxTaskGetStackStart(t.xHandle));
+        out += fmt::format("{:<16}  {:<6}  {:>4}  {:>6}\n", t.pcTaskName, psram ? "psram" : "intern",
+                           (unsigned)t.uxCurrentPriority, (unsigned)t.usStackHighWaterMark);
+    }
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_send(req, out.data(), out.size());
 }
 
 /* ------------------------------ Boot greeting ----------------------------- */
@@ -1258,7 +1434,7 @@ void Hal::startLocalApiService(std::function<void(std::string_view)> onStartLog)
 
     httpd_config_t config   = HTTPD_DEFAULT_CONFIG();
     config.stack_size       = 12288;  // TLS to the VOICEVOX cloud runs inside handlers
-    config.max_uri_handlers = 24;
+    config.max_uri_handlers = 32;
     config.recv_wait_timeout = 10;
     config.send_wait_timeout = 10;
 
@@ -1281,17 +1457,22 @@ void Hal::startLocalApiService(std::function<void(std::string_view)> onStartLog)
         {.uri = "/api/state", .method = HTTP_GET, .handler = handle_state, .user_ctx = nullptr},
         {.uri = "/api/servo", .method = HTTP_POST, .handler = handle_servo, .user_ctx = nullptr},
         {.uri = "/api/reboot", .method = HTTP_POST, .handler = handle_reboot, .user_ctx = nullptr},
+        {.uri = "/api/coredump", .method = HTTP_GET, .handler = handle_coredump, .user_ctx = nullptr},
+        {.uri = "/api/debug/heap", .method = HTTP_GET, .handler = handle_debug_heap, .user_ctx = nullptr},
         {.uri = "/api/voicevox/test", .method = HTTP_POST, .handler = handle_voicevox_test, .user_ctx = nullptr},
         {.uri = "/api/voicevox/speakers", .method = HTTP_GET, .handler = handle_voicevox_json, .user_ctx = (void*)"speakers"},
         {.uri = "/api/voicevox/points", .method = HTTP_GET, .handler = handle_voicevox_json, .user_ctx = (void*)"points"},
         {.uri = "/api/notify/check", .method = HTTP_POST, .handler = handle_notify_check, .user_ctx = nullptr},
         {.uri = "/api/meeting", .method = HTTP_POST, .handler = handle_meeting, .user_ctx = nullptr},
         {.uri = "/api/face/test", .method = HTTP_POST, .handler = handle_face_test, .user_ctx = nullptr},
-        {.uri = "/api/face/frame.bmp", .method = HTTP_GET, .handler = handle_face_frame, .user_ctx = nullptr},
-        {.uri = "/api/action", .method = HTTP_POST, .handler = handle_action, .user_ctx = nullptr},
+        {.uri = "/api/face/frame.bmp", .method = HTTP_GET, .handler = handle_face_frame, .user_ctx = nullptr},        {.uri = "/api/action", .method = HTTP_POST, .handler = handle_action, .user_ctx = nullptr},
         {.uri = "/api/events", .method = HTTP_GET, .handler = handle_get_events, .user_ctx = nullptr},
         {.uri = "/api/events", .method = HTTP_POST, .handler = handle_post_events, .user_ctx = nullptr},
         {.uri = "/api/event", .method = HTTP_POST, .handler = handle_event, .user_ctx = nullptr},
+        {.uri = "/api/chat", .method = HTTP_POST, .handler = handle_chat, .user_ctx = nullptr},
+        {.uri = "/api/chat/listen", .method = HTTP_POST, .handler = handle_chat_listen, .user_ctx = nullptr},
+        {.uri = "/api/chat/reset", .method = HTTP_POST, .handler = handle_chat_reset, .user_ctx = nullptr},
+        {.uri = "/api/chat/last.wav", .method = HTTP_GET, .handler = handle_chat_last_wav, .user_ctx = nullptr},
         {.uri = "/", .method = HTTP_GET, .handler = handle_settings_page, .user_ctx = nullptr},
     };
     for (const auto& uri : uris) {

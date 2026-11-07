@@ -244,6 +244,9 @@ void AppAvatar::onOpen()
 
     // Look for the user every few minutes while idling here
     GetHAL().setFaceIdleActive(true);
+
+    // Tap the face to talk with the AI
+    GetHAL().startAiChatService();
 }
 
 void AppAvatar::onRunning()
@@ -271,6 +274,9 @@ void AppAvatar::onRunning()
             GetStackChan().removeModifier(_dance_modifier_id);
             _dance_modifier_id = -1;
             mclog::tagInfo(getAppInfo().name, "dance modifier removed");
+        } else if (_ws_call_view_id < 0) {
+            // Tap the face to talk with the AI (Gemini / ChatGPT / Claude, see the web settings page)
+            GetHAL().requestAiChatListen();
         }
     }
 

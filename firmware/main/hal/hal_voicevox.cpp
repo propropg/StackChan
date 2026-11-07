@@ -86,6 +86,47 @@ static std::string format_float(float value)
     return buf;
 }
 
+// Read the whole response body of an opened request (headers already fetched) into out
+static bool read_response(esp_http_client_handle_t client, int64_t content_length, size_t max_size, PsramBytes& out,
+                          std::string& error)
+{
+    bool ok = false;
+    try {
+        out.clear();
+        if (content_length > 0) {
+            out.reserve(std::min<size_t>(content_length, max_size));
+        }
+        size_t received = 0;
+        while (true) {
+            if (received >= max_size) {
+                error = "response too large";
+                break;
+            }
+            if (out.size() < received + 4096) {
+                out.resize(std::min(received + 4096, max_size));
+            }
+            int n = esp_http_client_read(client, reinterpret_cast<char*>(out.data() + received), out.size() - received);
+            if (n < 0) {
+                error = "read failed";
+                break;
+            }
+            if (n == 0) {
+                ok = esp_http_client_is_complete_data_received(client);
+                if (!ok) {
+                    error = "connection closed early";
+                }
+                break;
+            }
+            received += n;
+        }
+        out.resize(received);
+    } catch (const std::bad_alloc&) {
+        error = "out of memory";
+        ok    = false;
+    }
+    return ok;
+}
+
 bool https_get(const std::string& url, size_t max_size, PsramBytes& out, int& status, std::string& error)
 {
     esp_http_client_config_t config = {};
@@ -124,39 +165,55 @@ bool https_get(const std::string& url, size_t max_size, PsramBytes& out, int& st
     if (err != ESP_OK) {
         error = std::string("connect failed: ") + esp_err_to_name(err);
     } else {
-        try {
-            out.clear();
-            if (content_length > 0) {
-                out.reserve(std::min<size_t>(content_length, max_size));
+        ok = read_response(client, content_length, max_size, out, error);
+    }
+
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    return ok;
+}
+
+bool https_post(const std::string& url, const HttpHeaders& headers, const uint8_t* body, size_t body_size,
+                size_t max_size, PsramBytes& out, int& status, std::string& error, int timeout_ms)
+{
+    esp_http_client_config_t config = {};
+    config.url                      = url.c_str();
+    config.method                   = HTTP_METHOD_POST;
+    config.timeout_ms               = timeout_ms;
+    config.crt_bundle_attach        = esp_crt_bundle_attach;
+    config.buffer_size              = 4096;
+    config.buffer_size_tx           = 2048;
+    config.user_agent               = "StackChan";
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        error = "http client init failed";
+        return false;
+    }
+    for (const auto& [name, value] : headers) {
+        esp_http_client_set_header(client, name.c_str(), value.c_str());
+    }
+
+    bool ok       = false;
+    esp_err_t err = esp_http_client_open(client, body_size);
+    if (err != ESP_OK) {
+        error = std::string("connect failed: ") + esp_err_to_name(err);
+    } else {
+        size_t sent = 0;
+        while (sent < body_size) {
+            int n = esp_http_client_write(client, reinterpret_cast<const char*>(body + sent),
+                                          std::min<size_t>(body_size - sent, 8192));
+            if (n <= 0) {
+                break;
             }
-            size_t received = 0;
-            while (true) {
-                if (received >= max_size) {
-                    error = "response too large";
-                    break;
-                }
-                if (out.size() < received + 4096) {
-                    out.resize(std::min(received + 4096, max_size));
-                }
-                int n = esp_http_client_read(client, reinterpret_cast<char*>(out.data() + received),
-                                             out.size() - received);
-                if (n < 0) {
-                    error = "read failed";
-                    break;
-                }
-                if (n == 0) {
-                    ok = esp_http_client_is_complete_data_received(client);
-                    if (!ok) {
-                        error = "connection closed early";
-                    }
-                    break;
-                }
-                received += n;
-            }
-            out.resize(received);
-        } catch (const std::bad_alloc&) {
-            error = "out of memory";
-            ok    = false;
+            sent += n;
+        }
+        if (sent < body_size) {
+            error = "send failed";
+        } else {
+            int64_t content_length = esp_http_client_fetch_headers(client);
+            status                 = esp_http_client_get_status_code(client);
+            ok                     = read_response(client, content_length, max_size, out, error);
         }
     }
 

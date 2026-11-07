@@ -15,6 +15,7 @@
 #include <array>
 #include <lvgl_image.h>
 #include <string_view>
+#include <mutex>
 #include "utils/psram_allocator.h"
 #include <ArduinoJson.hpp>
 
@@ -173,6 +174,37 @@ struct NotifyStatus_t {
     int64_t lastCheckUs = 0;  // esp_timer time of the last poll, 0 = never
     int lastCount       = 0;
     std::string lastError;
+};
+
+/**
+ * @brief AI conversation in the AVATAR app (tap the face, talk, StackChan answers with VOICEVOX)
+ *
+ * Speech recognition always goes through Gemini (free tier) when a Gemini key is set; with provider "gemini"
+ * listening and answering is a single request. OpenAI / Claude are paid APIs and only used when selected.
+ */
+struct AiChatConfig_t {
+    bool enabled         = true;
+    std::string provider = "gemini";  // gemini / openai / claude
+    std::string geminiKey;
+    std::string geminiModel = "gemini-3.5-flash-lite";
+    std::string openaiKey;
+    std::string openaiModel = "gpt-5-mini";
+    std::string claudeKey;
+    std::string claudeModel = "claude-haiku-5-5";
+    std::string systemPrompt =
+        "あなたはスタックチャンという小さなロボットです。ユーザーと日本語で、友達のように明るく話します。"
+        "返事は音声で読み上げられるので、1〜3文の短い話し言葉にして、絵文字・記号・箇条書き・マークダウンは使わないでください。";
+    int historyTurns = 6;  // past exchanges sent with each request
+    // Weather given to the AI (Open-Meteo, free, no key); picked on the settings page. Empty name = none.
+    std::string weatherName;
+    float weatherLat = 0.0f;
+    float weatherLon = 0.0f;
+};
+
+struct AiChatResult_t {
+    std::string heard;    // what the user said (transcribed or the text sent)
+    std::string reply;    // StackChan's answer without the emotion tag
+    std::string emotion;  // neutral / happy / angry / sad / doubt / sleepy
 };
 
 /**
@@ -381,6 +413,21 @@ public:
     void setFaceIdleActive(bool active);
     // Something is playing or recording right now (speakText, playWav, ...)
     bool isAudioBusy();
+    /* --------------------------------- AI chat -------------------------------- */
+    AiChatConfig_t getAiChatConfig();
+    void setAiChatConfig(const AiChatConfig_t& config);
+    // Starts the conversation task once (AVATAR app)
+    void startAiChatService();
+    // Listen on the mic and answer, in the background. Returns false when a conversation is already running.
+    bool requestAiChatListen();
+    bool isAiChatBusy();
+    // WAV of the last mic recording (empty before the first one)
+    bool getAiChatLastRecording(PsramBytes& wav);
+    // Answer a typed message (speaks the reply like a spoken one). Blocks. "busy" when a conversation is running.
+    bool aiChatText(const std::string& text, AiChatResult_t& result, std::string& error);
+    void clearAiChatHistory();
+    // Held while playing or recording so the speaker and the mic are never used at the same time
+    std::mutex& audioMutex();
 
     /* -------------------------------- VOICEVOX -------------------------------- */
     // Cloud VOICEVOX (WEB版VOICEVOX API by su-shiki), configured from the web settings page or SETUP

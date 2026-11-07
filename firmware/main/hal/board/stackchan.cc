@@ -11,6 +11,8 @@
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
+#include <driver/gpio.h>
+#include <rom/ets_sys.h>
 #include <wifi_station.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
@@ -69,6 +71,11 @@ esp_err_t ApplyIli9342eInit(esp_lcd_panel_io_handle_t panel_io)
 
 }  // namespace
 
+static uint8_t _pmic_on_status  = 0;
+static uint8_t _pmic_off_status = 0;
+static uint8_t _pmic_vbus_limit_boot = 0;  // reg 0x16 as found at boot, before we raise it
+static uint8_t _pmic_uvp_ctrl_boot   = 0;  // reg 0x23 as found at boot, before we clear the DCDC UVP power-off bits
+
 class Pmic : public Axp2101 {
 public:
     /**
@@ -94,6 +101,26 @@ public:
     // Power Init
     Pmic(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : Axp2101(i2c_bus, addr)
     {
+        _pmic_on_status  = ReadReg(0x20);
+        _pmic_off_status = ReadReg(0x21);
+        ESP_LOGW(TAG, "PMIC power-on status 0x%02X, power-off status 0x%02X", _pmic_on_status, _pmic_off_status);
+
+        // VBUS input current limit (reg 0x16, bits 2:0: 100/500/900/1000/1500/2000 mA). Left at a low default, the
+        // servos, speaker and camera outrun the USB input; the battery then has to make up the rest, sags, and the
+        // DCDC rails drop out ("DCDC under voltage" power-off). Allow up to 2 A; a weaker source is still protected
+        // by the PMIC's input voltage regulation (VINDPM).
+        _pmic_vbus_limit_boot = ReadReg(0x16);
+        WriteReg(0x16, (_pmic_vbus_limit_boot & ~0x07) | 0x05);
+        ESP_LOGW(TAG, "PMIC VBUS current limit 0x%02X -> 0x%02X", _pmic_vbus_limit_boot, ReadReg(0x16));
+
+        // DCDC under-voltage power-off (reg 0x23, bits 4:0 = DCDC5..DCDC1 "turn off at 85%"). A load spike from the
+        // servos or speaker dips a rail for an instant and the PMIC cuts power to everything, so StackChan simply
+        // goes dark until someone turns it back on (power-off status 0x21 = 0x20). With it off, a real dip at worst
+        // trips the ESP32 brownout detector and the firmware reboots on its own. Bit 5 (over-voltage) stays on.
+        _pmic_uvp_ctrl_boot = ReadReg(0x23);
+        WriteReg(0x23, _pmic_uvp_ctrl_boot & ~0x1F);
+        ESP_LOGW(TAG, "PMIC DCDC UVP/OVP control 0x%02X -> 0x%02X", _pmic_uvp_ctrl_boot, ReadReg(0x23));
+
         uint8_t data = ReadReg(0x90);
         data |= 0b10110100;
         WriteReg(0x90, data);
@@ -114,6 +141,42 @@ public:
         }
 
         SetBrightness(0);
+    }
+
+    // 14-bit ADC results, high byte first (the ADC channels are enabled in the constructor, reg 0x30)
+    int ReadAdc14(uint8_t reg)
+    {
+        uint8_t buf[2] = {0, 0};
+        ReadRegs(reg, buf, 2);
+        return ((buf[0] & 0x3F) << 8) | buf[1];
+    }
+
+    bool ReadPowerReadings(int& vbat_mv, int& vbus_mv, int& vsys_mv, int& die_temp_dc)
+    {
+        vbat_mv = ReadAdc14(0x34);
+        vbus_mv = ReadAdc14(0x38);
+        vsys_mv = ReadAdc14(0x3A);
+        // Die temperature: 22 C + (7274 - raw) / 20 C per datasheet
+        int raw     = ReadAdc14(0x3C);
+        die_temp_dc = 220 + (7274 - raw) / 2;
+        return vsys_mv != 0;
+    }
+
+    uint8_t ReadVbusLimit()
+    {
+        return ReadReg(0x16);
+    }
+
+    uint8_t ReadUvpCtrl()
+    {
+        return ReadReg(0x23);
+    }
+
+    // reg 0x00 PMU status 1 (bit 3: battery present, bit 5: VBUS good), reg 0x01 PMU status 2 (charge state)
+    void ReadStatus(uint8_t& status1, uint8_t& status2)
+    {
+        status1 = ReadReg(0x00);
+        status2 = ReadReg(0x01);
     }
 
     void SetBrightness(uint8_t brightness)
@@ -328,6 +391,11 @@ private:
 
     bool ShouldEnablePowerSave(bool has_external_power, bool is_discharging) const
     {
+        // Only the AI agent (xiaozhi) resets the idle timer, so in AVATAR and the other apps it would blank the
+        // screen after 5 minutes and power off after 10 however busy StackChan is. A desk robot stays on there.
+        if (!hal_bridge::is_xiaozhi_mode()) {
+            return false;
+        }
         return is_discharging || (has_external_power && xiaozhi_config_.allowShutdownWhenCharging);
     }
 
@@ -383,8 +451,45 @@ private:
         UpdatePowerSaveEnabled(pmic_->IsExternalPowerConnected(), pmic_->IsDischarging());
     }
 
+    // A device can be left holding SDA low when the ESP32 resets mid-transfer (reset button, flashing, a
+    // crash); the peripherals stay powered, so the bus stays stuck across reboots and every transfer fails
+    // with ESP_ERR_INVALID_STATE. Clock SCL until the device lets go, then send a STOP.
+    static void ClearStuckI2cBus(gpio_num_t sda, gpio_num_t scl)
+    {
+        gpio_config_t io = {};
+        io.pin_bit_mask  = (1ULL << sda) | (1ULL << scl);
+        io.mode          = GPIO_MODE_INPUT_OUTPUT_OD;
+        io.pull_up_en    = GPIO_PULLUP_ENABLE;
+        gpio_set_level(sda, 1);
+        gpio_set_level(scl, 1);
+        gpio_config(&io);
+        ets_delay_us(10);
+        if (gpio_get_level(sda) == 1) {
+            return;
+        }
+        ESP_LOGW(TAG, "I2C SDA held low, clocking the bus free");
+        for (int i = 0; i < 16 && gpio_get_level(sda) == 0; i++) {
+            gpio_set_level(scl, 0);
+            ets_delay_us(5);
+            gpio_set_level(scl, 1);
+            ets_delay_us(5);
+        }
+        // STOP: SDA low -> high while SCL is high
+        gpio_set_level(scl, 0);
+        ets_delay_us(5);
+        gpio_set_level(sda, 0);
+        ets_delay_us(5);
+        gpio_set_level(scl, 1);
+        ets_delay_us(5);
+        gpio_set_level(sda, 1);
+        ets_delay_us(5);
+        ESP_LOGW(TAG, "I2C SDA is %s after the bus clear", gpio_get_level(sda) ? "released" : "still low");
+    }
+
     void InitializeI2c()
     {
+        ClearStuckI2cBus(AUDIO_CODEC_I2C_SDA_PIN, AUDIO_CODEC_I2C_SCL_PIN);
+
         // Initialize I2C peripheral
         i2c_master_bus_config_t i2c_bus_cfg = {
             .i2c_port          = (i2c_port_t)1,
@@ -621,15 +726,16 @@ public:
         return camera_;
     }
 
+    Pmic* GetPmic()
+    {
+        return pmic_;
+    }
+
     virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override
     {
-        static bool last_discharging = false;
-        charging                     = pmic_->IsCharging();
-        discharging                  = pmic_->IsDischarging();
-        if (discharging != last_discharging) {
-            power_save_timer_->SetEnabled(discharging);
-            last_discharging = discharging;
-        }
+        charging    = pmic_->IsCharging();
+        discharging = pmic_->IsDischarging();
+        UpdatePowerSaveEnabled(pmic_->IsExternalPowerConnected(), discharging);
 
         level = pmic_->GetBatteryLevel();
         return true;
@@ -681,6 +787,38 @@ int hal_bridge::board_get_battery_level()
     } else {
         return 100;
     }
+}
+
+bool hal_bridge::board_get_power_readings(int& vbat_mv, int& vbus_mv, int& vsys_mv, int& die_temp_dc)
+{
+    auto* board = static_cast<M5StackCoreS3Board*>(&Board::GetInstance());
+    return board->GetPmic()->ReadPowerReadings(vbat_mv, vbus_mv, vsys_mv, die_temp_dc);
+}
+
+void hal_bridge::board_get_pmic_status(uint8_t& status1, uint8_t& status2)
+{
+    auto* board = static_cast<M5StackCoreS3Board*>(&Board::GetInstance());
+    board->GetPmic()->ReadStatus(status1, status2);
+}
+
+void hal_bridge::board_get_pmic_vbus_limit(uint8_t& at_boot, uint8_t& now)
+{
+    auto* board = static_cast<M5StackCoreS3Board*>(&Board::GetInstance());
+    at_boot     = _pmic_vbus_limit_boot;
+    now         = board->GetPmic()->ReadVbusLimit();
+}
+
+void hal_bridge::board_get_pmic_uvp_ctrl(uint8_t& at_boot, uint8_t& now)
+{
+    auto* board = static_cast<M5StackCoreS3Board*>(&Board::GetInstance());
+    at_boot     = _pmic_uvp_ctrl_boot;
+    now         = board->GetPmic()->ReadUvpCtrl();
+}
+
+void hal_bridge::board_get_pmic_power_status(uint8_t& on_status, uint8_t& off_status)
+{
+    on_status  = _pmic_on_status;
+    off_status = _pmic_off_status;
 }
 
 bool hal_bridge::board_is_battery_charging()

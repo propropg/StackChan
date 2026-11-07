@@ -1,8 +1,8 @@
 /**
  * StackChan notification relay (Google Apps Script)
  *
- * Collects new Gmail messages and upcoming Google Calendar events and hands them to StackChan,
- * which polls this web app every few minutes and reads them aloud with VOICEVOX.
+ * Collects new Gmail messages, upcoming Google Calendar events and new Google Chat messages and hands
+ * them to StackChan, which polls this web app every few minutes and reads them aloud with VOICEVOX.
  *
  * Setup:
  *   1. Paste this file into a new project on https://script.google.com/
@@ -10,7 +10,12 @@
  *   3. Deploy > New deployment > Web app, Execute as: Me, Who has access: Anyone
  *   4. Put "<web app URL>?token=<token>" into the StackChan settings page (Notifications)
  *
- * Response: {"ok":true,"items":[{"type":"gmail"|"calendar","text":"<to speak>","bubble":"<short text>"}]}
+ * Google Chat (optional) needs a standard Cloud project with the Chat API enabled and the Chat app
+ * configured, linked in Project Settings, plus the "Google Chat API" service (ID: Chat). Add the
+ * "People API" service (ID: People, also enabled in the Cloud project) to read out sender names.
+ *
+ * Response: {"ok":true,"items":[{"type":"gmail"|"calendar"|"chat","text":"<to speak>","bubble":"<short text>"}]}
+ *           chat items add "notice": the space name (space posts) or the sender (DMs), no body, spoken when the device is set not to read chat bodies
  */
 
 // ------------------------------- Settings -------------------------------
@@ -25,13 +30,24 @@ const CALENDAR_LEAD_MINUTES = 10;
 const CALENDAR_IDS = ['primary'];
 // Read out at most this many mails per poll; the rest are summarized as "N more"
 const MAX_MAILS_PER_POLL = 3;
+// Google Chat: 'dm_and_mentions' = direct / group messages and @mentions in spaces, 'all' = every message
+const CHAT_MODE = 'dm_and_mentions';
+// Read out at most this many chat messages per poll
+const MAX_CHATS_PER_POLL = 3;
 
 // ------------------------------------------------------------------------
+
+// Returned in every response so you can tell which code the deployment runs (open the URL in a browser)
+const VERSION = '2026-10-20a';
 
 const PROP_TOKEN = 'TOKEN';
 const PROP_SEEN_MAILS = 'SEEN_MAILS';
 const PROP_SEEN_EVENTS = 'SEEN_EVENTS';
 const PROP_STARTED = 'STARTED_AT';
+const PROP_SEEN_CHATS = 'SEEN_CHATS';
+const PROP_CHAT_CHECKED = 'CHAT_CHECKED_AT';
+const PROP_CHAT_SELF = 'CHAT_SELF';
+const PROP_CHAT_NAMES = 'CHAT_NAMES';
 
 function setup() {
   const props = PropertiesService.getScriptProperties();
@@ -40,13 +56,20 @@ function setup() {
     token = Utilities.getUuid().replace(/-/g, '');
     props.setProperty(PROP_TOKEN, token);
   }
-  // Mails that arrived before setup are not announced
+  // Items from before setup are not announced
   props.setProperty(PROP_STARTED, String(Date.now()));
-  props.deleteProperty(PROP_SEEN_MAILS);
-  props.deleteProperty(PROP_SEEN_EVENTS);
+  [PROP_SEEN_MAILS, PROP_SEEN_EVENTS, PROP_SEEN_CHATS, PROP_CHAT_CHECKED, PROP_CHAT_SELF].forEach(key => props.deleteProperty(key));
   // Touch the services so the authorization prompt covers them
   GmailApp.getInboxUnreadCount();
   CalendarApp.getDefaultCalendar();
+  if (chatAvailable()) {
+    Chat.Spaces.list({ pageSize: 1 });
+    Logger.log('Google Chat: enabled (you are ' + (chatSelf(props) || 'unknown') + ')');
+    Logger.log('Sender names: ' + (typeof People !== 'undefined' ? 'People API' : 'not available (add the People API service)'));
+  } else {
+    Logger.log('Google Chat: not enabled (add the "Google Chat API" service to read chats)');
+  }
+  Logger.log('version: ' + VERSION);
   Logger.log('token: ' + token);
   Logger.log('StackChan URL: <web app URL>?token=' + token);
 }
@@ -64,8 +87,10 @@ function doGet(e) {
     return json({ ok: true, items: [] });
   }
   try {
-    const items = collectMails(props).concat(collectEvents(props));
-    return json({ ok: true, items: items });
+    const items = collectMails(props).concat(collectEvents(props), collectChatsSafely(props));
+    // Shows up under Executions in the editor: what the device was actually handed
+    if (items.length > 0) console.log('items: ' + JSON.stringify(items));
+    return json({ ok: true, version: VERSION, items: items });
   } catch (err) {
     return json({ ok: false, error: String(err) });
   } finally {
@@ -157,6 +182,216 @@ function collectEvents(props) {
   });
   saveList(props, PROP_SEEN_EVENTS, seen, 100);
   return items;
+}
+
+// ------------------------------- Google Chat -------------------------------
+
+function chatAvailable() {
+  return typeof Chat !== 'undefined';
+}
+
+// A Chat failure (service missing, quota, ...) must not hide the mails and events
+function collectChatsSafely(props) {
+  if (!chatAvailable()) return [];
+  try {
+    return collectChats(props);
+  } catch (err) {
+    console.error('chat: ' + err);
+    return [];
+  }
+}
+
+function isDirectSpace(space) {
+  return space.spaceType === 'DIRECT_MESSAGE' || space.spaceType === 'GROUP_CHAT';
+}
+
+function collectChats(props) {
+  const startedAt = Number(props.getProperty(PROP_STARTED) || 0);
+  // Re-read the last minute too (messages can land slightly out of order); seen ids drop duplicates
+  const since = new Date(Math.max(startedAt, Number(props.getProperty(PROP_CHAT_CHECKED) || 0) - 60 * 1000));
+  const checkedAt = Date.now();
+  const self = chatSelf(props);
+  const seen = loadList(props, PROP_SEEN_CHATS);
+  const fresh = [];
+
+  activeSpaces(since).forEach(space => {
+    // One unreadable space must not hide the others
+    try {
+      listMessagesSince(space, since).forEach(message => {
+        if (seen.indexOf(message.name) >= 0) return;
+        seen.push(message.name);
+        const sender = message.sender || {};
+        if ((self && sender.name === self) || sender.type === 'BOT') return;
+        if (CHAT_MODE !== 'all' && !isDirectSpace(space) && !mentionsMe(message, self)) return;
+        fresh.push({ space: space, message: message });
+      });
+    } catch (err) {
+      console.error('chat: ' + (space.displayName || space.name) + ': ' + err);
+    }
+  });
+
+  saveList(props, PROP_SEEN_CHATS, seen, 120);  // message names are ~50 chars; stay under 9KB
+  props.setProperty(PROP_CHAT_CHECKED, String(checkedAt));
+  if (fresh.length === 0) return [];
+
+  if (READ_MODE === 'count') {
+    const countText = '新しいチャットが' + fresh.length + '件届いたよ。';
+    return [{ type: 'chat', text: countText, notice: countText, bubble: 'チャット ' + fresh.length + '件' }];
+  }
+
+  const names = loadNames(props);
+  const items = fresh.slice(0, MAX_CHATS_PER_POLL).map(item => {
+    const name = senderDisplayName(item.message.sender || {}, names);
+    const text = clip(item.message.argumentText || item.message.text || '（添付ファイル）', 40);
+    const spaceName = isDirectSpace(item.space) || !item.space.displayName ? '' : clip(item.space.displayName, 15);
+    const where = spaceName ? spaceName + 'で、' : '';
+    return {
+      type: 'chat',
+      text: where + name + 'さんからチャット。' + text,
+      // Spoken instead of text unless the device reads chat bodies: the space for space posts, the sender for DMs
+      notice: spaceName ? spaceName + 'にチャットが届いたよ。' : name + 'さんからチャットが届いたよ。',
+      bubble: name + '：' + text,
+    };
+  });
+  saveNames(props, names);
+  const rest = fresh.length - items.length;
+  if (rest > 0) {
+    const restText = 'ほかにも' + rest + '件チャットが届いているよ。';
+    items.push({ type: 'chat', text: restText, notice: restText, bubble: 'ほか ' + rest + '件' });
+  }
+  return items;
+}
+
+// Messages posted after `since`, oldest first (the API default order)
+function listMessagesSince(space, since) {
+  const messages = [];
+  let pageToken;
+  do {
+    const res = Chat.Spaces.Messages.list(space.name, {
+      filter: 'createTime > "' + since.toISOString() + '"',
+      pageSize: 50,
+      pageToken: pageToken,
+    });
+    (res.messages || []).forEach(message => messages.push(message));
+    pageToken = res.nextPageToken;
+  } while (pageToken);
+  return messages;
+}
+
+// Run from the editor to see what the Chat part sees (does not mark anything as announced)
+function debugChat() {
+  const props = PropertiesService.getScriptProperties();
+  Logger.log('Chat service: ' + (chatAvailable() ? 'added' : 'NOT added'));
+  if (!chatAvailable()) return;
+  Logger.log('CHAT_MODE: ' + CHAT_MODE + ', you are: ' + (chatSelf(props) || 'unknown'));
+  Logger.log('setup at: ' + new Date(Number(props.getProperty(PROP_STARTED) || 0)) +
+             ', last chat check: ' + new Date(Number(props.getProperty(PROP_CHAT_CHECKED) || 0)));
+  const since = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  const spaces = activeSpaces(since);
+  Logger.log('spaces with posts in the last 2 hours: ' + spaces.length);
+  spaces.forEach(space => {
+    try {
+      const messages = listMessagesSince(space, since);
+      Logger.log('- ' + (space.displayName || space.name) + ' (' + space.spaceType + '): ' + messages.length + ' messages');
+      const names = loadNames(props);
+      messages.slice(-3).forEach(m => Logger.log('    ' + m.createTime + ' ' + senderDisplayName(m.sender || {}, names) + ': ' + clip(m.text || '', 30)));
+    } catch (err) {
+      Logger.log('- ' + (space.displayName || space.name) + ': ERROR ' + err);
+    }
+  });
+}
+
+// Spaces with a message after `since` (lastActiveTime saves listing messages of quiet spaces)
+function activeSpaces(since) {
+  const spaces = [];
+  let pageToken;
+  let pages = 0;
+  do {
+    const res = Chat.Spaces.list({ pageSize: 1000, pageToken: pageToken });
+    (res.spaces || []).forEach(space => {
+      if (!space.lastActiveTime || new Date(space.lastActiveTime) > since) spaces.push(space);
+    });
+    pageToken = res.nextPageToken;
+  } while (pageToken && ++pages < 5);
+  return spaces;
+}
+
+// "users/<id>" of the script owner: the People API id is the same number; otherwise look for a space
+// membership through the email alias
+function chatSelf(props) {
+  let self = props.getProperty(PROP_CHAT_SELF);
+  if (self) return self;
+  if (typeof People !== 'undefined') {
+    try {
+      const me = People.People.get('people/me', { personFields: 'metadata' });
+      if (me.resourceName) self = me.resourceName.replace('people/', 'users/');
+    } catch (e) {
+      // needs the "profile" scope, which Apps Script does not request by itself; fall back to the membership
+    }
+  }
+  if (self) {
+    props.setProperty(PROP_CHAT_SELF, self);
+    return self;
+  }
+  const email = Session.getEffectiveUser().getEmail();
+  const res = Chat.Spaces.list({ pageSize: 20 });
+  let lastError = null;
+  for (const space of res.spaces || []) {
+    try {
+      const membership = Chat.Spaces.Members.get(space.name + '/members/' + email);
+      if (membership.member && membership.member.name) {
+        self = membership.member.name;
+        break;
+      }
+    } catch (e) {
+      lastError = e;  // try the next space
+    }
+  }
+  if (!self && lastError) console.error('chat self via membership (' + email + '): ' + lastError);
+  if (self) props.setProperty(PROP_CHAT_SELF, self);
+  return self || '';
+}
+
+function mentionsMe(message, self) {
+  return (message.annotations || []).some(a =>
+    a.type === 'USER_MENTION' && a.userMention && a.userMention.user &&
+    ((self && a.userMention.user.name === self) || a.userMention.user.name === 'users/all'));
+}
+
+// The Chat API leaves displayName empty for people under user auth; look them up with the People API
+function senderDisplayName(sender, names) {
+  if (sender.displayName) return clip(sender.displayName, 20);
+  const id = (sender.name || '').replace('users/', '');
+  if (!id) return '誰か';
+  if (names[id]) return names[id];
+  if (typeof People !== 'undefined') {
+    try {
+      const person = People.People.get('people/' + id, { personFields: 'names' });
+      const name = person.names && person.names[0] && person.names[0].displayName;
+      if (name) {
+        names[id] = clip(name, 20);
+        return names[id];
+      }
+    } catch (e) {
+      // not visible in the directory
+    }
+  }
+  return '誰か';
+}
+
+function loadNames(props) {
+  try {
+    return JSON.parse(props.getProperty(PROP_CHAT_NAMES) || '{}');
+  } catch (e) {
+    return {};
+  }
+}
+
+// Cap the name cache so the property stays small
+function saveNames(props, names) {
+  const kept = {};
+  Object.keys(names).slice(-100).forEach(k => { kept[k] = names[k]; });
+  props.setProperty(PROP_CHAT_NAMES, JSON.stringify(kept));
 }
 
 // ---------------------------------- Utils ---------------------------------

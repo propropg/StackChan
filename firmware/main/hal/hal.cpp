@@ -7,6 +7,11 @@
 #include <memory>
 #include <mooncake_log.h>
 #include <nvs_flash.h>
+#include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <atomic>
+#include <cstdlib>
 
 static std::unique_ptr<Hal> _hal_instance;
 static const std::string_view _tag = "HAL";
@@ -63,8 +68,39 @@ std::uint32_t Hal::millis()
     return esp_timer_get_time() / 1000;
 }
 
+/* ------------------------------ Hang watchdog ----------------------------- */
+// The UI loop sometimes freezes for good (screen stuck, HTTP server not accepting) without a crash, so
+// nothing tells us why. When the main loop has not come round for a minute, abort on purpose: the panic
+// handler then writes a core dump with every task's backtrace to flash, readable from /api/coredump.
+
+static constexpr int64_t _hang_timeout_us = 60 * 1000 * 1000;
+static std::atomic<int64_t> _last_feed_us{0};
+static std::atomic<bool> _hang_wdt_armed{false};
+
+static void hang_watchdog_task(void*)
+{
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        if (!_hang_wdt_armed) {
+            continue;
+        }
+        int64_t stalled_us = esp_timer_get_time() - _last_feed_us;
+        if (stalled_us > _hang_timeout_us) {
+            mclog::tagError(_tag, "main loop stalled for {} s, aborting to save a core dump", stalled_us / 1000000);
+            abort();
+        }
+    }
+}
+
 void Hal::feedTheDog()
 {
+    _last_feed_us = esp_timer_get_time();
+    if (!_hang_wdt_armed.exchange(true)) {
+        static bool started = false;
+        if (!started) {
+            started = xTaskCreate(hang_watchdog_task, "hang_wdt", 3072, nullptr, 20, nullptr) == pdPASS;
+        }
+    }
     vTaskDelay(1);
 }
 
@@ -179,6 +215,7 @@ static void _stackchan_update_task(void* param)
 void Hal::startXiaozhi()
 {
     mclog::tagInfo(_tag, "start xiaozhi");
+    _hang_wdt_armed = false;  // the main loop is gone from here on
 
     auto& motion = GetStackChan().motion();
     motion.setAutoAngleSyncEnabled(true);

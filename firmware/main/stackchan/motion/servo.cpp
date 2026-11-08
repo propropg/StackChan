@@ -25,6 +25,21 @@ static SpringOptions_t _default_spring_options = {
     .visualDuration = 0.0,
 };
 
+// Fast moves pull current spikes from the battery that dip the PMIC's DCDC rails far enough for it to power the
+// whole robot off ("DCDC under voltage" in AXP2101 reg 0x21), so cap how hard any move accelerates, and more so
+// while the speaker is also drawing current. Damping is scaled with it so the motion keeps its shape.
+static constexpr float _max_stiffness            = 120.0f;
+static constexpr float _max_stiffness_with_audio = 60.0f;
+
+static void limit_spring(float& stiffness, float& damping)
+{
+    const float cap = GetHAL().isAudioBusy() ? _max_stiffness_with_audio : _max_stiffness;
+    if (stiffness > cap) {
+        damping *= sqrtf(cap / stiffness);
+        stiffness = cap;
+    }
+}
+
 void Servo::init()
 {
     apply_default_spring_options();
@@ -74,6 +89,7 @@ void Servo::move(int angle)
 
 void Servo::moveWithSpringParams(int angle, float stiffness, float damping)
 {
+    limit_spring(stiffness, damping);
     _angle_anim.springOptions().visualDuration = 0.0f;  // Disable timing override
     _angle_anim.springOptions().stiffness      = stiffness;
     _angle_anim.springOptions().damping        = damping;
@@ -101,8 +117,11 @@ void Servo::apply_default_spring_options()
 {
     auto& options          = _angle_anim.springOptions();
     options.visualDuration = 0.0f;  // Disable timing override
-    options.stiffness      = _default_spring_options.stiffness;
-    options.damping        = _default_spring_options.damping;
+    float stiffness        = _default_spring_options.stiffness;
+    float damping          = _default_spring_options.damping;
+    limit_spring(stiffness, damping);
+    options.stiffness = stiffness;
+    options.damping   = damping;
 }
 
 void Servo::update_angle_anim_target(int angle)

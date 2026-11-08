@@ -15,9 +15,105 @@
 #include <ctime>
 #include <sys/time.h>
 #include <esp_sntp.h>
+#include <esp_netif.h>
+#include <esp_wifi.h>
+#include <ping/ping_sock.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
 #include <atomic>
 
 static std::string _tag = "Network";
+
+/* ------------------------------ Link watchdog ----------------------------- */
+// The station sometimes stays associated while the link is dead (ARP and DNS go unanswered for hours), and
+// no disconnect event ever comes to trigger the reconnect. Ping the gateway once a minute and drop the
+// association after a few failed rounds; the Wi-Fi manager then reconnects as after any disconnect.
+
+static constexpr int _watchdog_interval_ms   = 60 * 1000;
+static constexpr int _watchdog_fail_rounds   = 3;
+static constexpr uint32_t _pings_per_round   = 4;
+
+static void ping_on_end(esp_ping_handle_t, void* args)
+{
+    xSemaphoreGive(static_cast<SemaphoreHandle_t>(args));
+}
+
+// Returns the number of replies, or -1 when the gateway is unknown or the ping could not start
+static int ping_gateway(SemaphoreHandle_t done)
+{
+    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_ip_info_t ip_info;
+    if (!netif || esp_netif_get_ip_info(netif, &ip_info) != ESP_OK || ip_info.gw.addr == 0) {
+        return -1;
+    }
+
+    esp_ping_config_t config = ESP_PING_DEFAULT_CONFIG();
+    config.target_addr.type      = IPADDR_TYPE_V4;
+    config.target_addr.u_addr.ip4.addr = ip_info.gw.addr;
+    config.count                 = _pings_per_round;
+    config.interval_ms           = 500;
+    config.timeout_ms            = 1000;
+    config.task_stack_size       = 3072;
+
+    esp_ping_callbacks_t callbacks = {};
+    callbacks.cb_args              = done;
+    callbacks.on_ping_end          = ping_on_end;
+
+    esp_ping_handle_t ping = nullptr;
+    if (esp_ping_new_session(&config, &callbacks, &ping) != ESP_OK) {
+        return -1;
+    }
+    esp_ping_start(ping);
+    xSemaphoreTake(done, pdMS_TO_TICKS(_pings_per_round * 1500 + 2000));
+    esp_ping_stop(ping);
+    uint32_t replies = 0;
+    esp_ping_get_profile(ping, ESP_PING_PROF_REPLY, &replies, sizeof(replies));
+    esp_ping_delete_session(ping);
+    return static_cast<int>(replies);
+}
+
+static void link_watchdog_task(void*)
+{
+    SemaphoreHandle_t done = xSemaphoreCreateBinary();
+    bool gateway_answers   = false;  // some routers drop ICMP; never act on those
+    int failed_rounds      = 0;
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(_watchdog_interval_ms));
+        if (!WifiManager::GetInstance().IsConnected()) {
+            failed_rounds = 0;
+            continue;
+        }
+        int replies = ping_gateway(done);
+        if (replies > 0) {
+            gateway_answers = true;
+            failed_rounds   = 0;
+            continue;
+        }
+        if (replies < 0 || !gateway_answers) {
+            continue;
+        }
+        failed_rounds++;
+        mclog::tagWarn(_tag, "gateway unreachable ({}/{})", failed_rounds, _watchdog_fail_rounds);
+        if (failed_rounds >= _watchdog_fail_rounds) {
+            mclog::tagWarn(_tag, "link looks dead, reconnecting Wi-Fi");
+            failed_rounds = 0;
+            esp_wifi_disconnect();  // the Wi-Fi manager reconnects on the disconnect event
+        }
+    }
+}
+
+static void start_link_watchdog()
+{
+    static bool started = false;
+    if (started) {
+        return;
+    }
+    started = xTaskCreate(link_watchdog_task, "link_wdt", 3072, nullptr, 2, nullptr) == pdPASS;
+    if (!started) {
+        mclog::tagError(_tag, "failed to start the link watchdog");
+    }
+}
 
 static void time_sync_notification_cb(struct timeval*)
 {
@@ -123,6 +219,7 @@ void Hal::startNetwork(std::function<void(std::string_view)> onLog)
     board.SetNetworkEventCallback(nullptr);
 
     startSntp();
+    start_link_watchdog();
 }
 
 WifiStatus Hal::getWifiStatus()

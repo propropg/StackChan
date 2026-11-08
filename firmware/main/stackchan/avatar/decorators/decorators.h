@@ -187,4 +187,61 @@ private:
     int _animation_index = 0;
 };
 
+/**
+ * @brief "We made eye contact" badge: a small blinking eye icon in the top left corner, shown when the face
+ * tracker finds the user
+ *
+ */
+class EyeContactDecorator : public Decorator {
+public:
+    /**
+     * @param parent
+     * @param destroyAfterMs Destroy after milliseconds, 0 for infinite
+     */
+    EyeContactDecorator(lv_obj_t* parent, uint32_t destroyAfterMs = 3000);
+    ~EyeContactDecorator();
+
+    void _update() override;
+    void setVisible(bool visible) override;
+
+private:
+    lv_obj_t* _badge = nullptr;
+
+    uint32_t _destroy_at     = 0;
+    uint32_t _next_blink     = 0;
+    bool _has_lifetime       = false;
+    bool _dim                = false;
+};
+
+/**
+ * @brief Digital clock (HH:MM, seven-segment style) at the top of the face, above the eyes. Stays until removed.
+ *
+ */
+class ClockDecorator : public Decorator {
+public:
+    /**
+     * @param parent
+     * @param align LV_ALIGN_TOP_LEFT, LV_ALIGN_TOP_MID or LV_ALIGN_TOP_RIGHT
+     * @param digitHeight Digit height in pixels (keep it under ~60 so the clock stays above the eyes)
+     */
+    ClockDecorator(lv_obj_t* parent, lv_align_t align = LV_ALIGN_TOP_MID, int digitHeight = 50);
+    ~ClockDecorator();
+
+    void _update() override;
+    void setVisible(bool visible) override;
+
+private:
+    static constexpr int _digit_count   = 4;
+    static constexpr int _segment_count = 7;
+
+    lv_obj_t* _panel = nullptr;
+    lv_obj_t* _segments[_digit_count][_segment_count] = {};
+    lv_obj_t* _colon[2]                                 = {};
+
+    int _shown_minute = -2;  // -1 = clock not set yet ("--:--")
+    int _shown_second = -1;
+
+    void show_digit(int index, int value);
+};
+
 }  // namespace stackchan::avatar

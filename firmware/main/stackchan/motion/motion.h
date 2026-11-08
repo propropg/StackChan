@@ -159,10 +159,24 @@ public:
     void setModifyLock(bool locked);
     bool isModifyLocked();
 
+    /**
+     * @brief The conversation front: where the user usually is (set when a face is found).
+     *
+     * Idle motion wanders around it and comes back to it, action motions are played relative to it and
+     * speech turns to it. Without a front everything centres on (0, 0) as before.
+     */
+    void setFront(int yawAngle, int pitchAngle);
+    void clearFront();
+    bool hasFront();
+    uitk::Vector2i getFront();  // (0, 0) when there is none
+    void goFront(int speed = 300);
+
 private:
     std::unique_ptr<Servo> _yaw_servo;
     std::unique_ptr<Servo> _pitch_servo;
     bool _is_modify_locked = false;
+    bool _has_front        = false;
+    uitk::Vector2i _front;
 };
 
 }  // namespace stackchan::motion

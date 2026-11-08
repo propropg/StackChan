@@ -15,6 +15,9 @@
 #include <array>
 #include <lvgl_image.h>
 #include <string_view>
+#include <mutex>
+#include "utils/psram_allocator.h"
+#include <ArduinoJson.hpp>
 
 /**
  * @brief
@@ -108,6 +111,100 @@ enum class WifiStatus {
 struct UserAccountInfo_t {
     std::string username;
     std::string deviceName;
+};
+
+/**
+ * @brief Cloud VOICEVOX speech settings
+ *
+ */
+struct VoicevoxConfig_t {
+    bool enabled = false;
+    std::string apiKey;
+    int speaker      = 3;  // ずんだもん (ノーマル)
+    float speed      = 1.0f;
+    float pitch      = 0.0f;
+    float intonation = 1.0f;
+    std::string greetingText = "こんにちは！スタックチャンだよ。";
+};
+
+/**
+ * @brief Speech + head motion + LED blink, run on the device (settings page buttons, Claude Code events)
+ *
+ */
+struct Action_t {
+    std::string text;            // spoken with VOICEVOX; empty = motion / LEDs only
+    std::string emotion;         // neutral / happy / angry / sad / doubt / sleepy, empty = keep
+    std::string motion = "none";  // none / nod / bow / look / shake
+    std::string bubble;          // speech bubble text, empty = none
+    std::string ledColor;        // "#RRGGBB", empty = no LEDs
+    int ledBlinks = 3;
+
+    static Action_t fromJson(ArduinoJson::JsonVariantConst json);
+    void toJson(ArduinoJson::JsonObject json) const;
+};
+
+/**
+ * @brief Gmail / Calendar notifications through the Apps Script relay
+ *
+ */
+struct NotifyConfig_t {
+    bool enabled = false;
+    std::string url;  // web app url including ?token=
+    int intervalSec = 120;
+    bool quietHours = true;  // no announcements between quietStart and quietEnd (hours, local time)
+    int quietStart  = 22;
+    int quietEnd    = 7;
+    bool chatReadContent = false;  // read Google Chat message text aloud; otherwise only who sent it
+    bool lookAtFace      = true;   // turn toward a face seen by the camera while reading items aloud
+};
+
+struct FaceTrackStatus_t {
+    bool modelLoaded = false;
+    std::string error;   // why the models could not be loaded
+    bool active      = false;
+    int inferMs      = 0;  // detection time of the last frame
+    int faces        = 0;  // faces in the last frame
+    int64_t lastSeenUs = 0;  // esp_timer time a face was last seen, 0 = never
+    float lastX = 0.0f, lastY = 0.0f;  // where it was, -1..1 from the image centre (x right, y down)
+    bool hasFront = false;  // conversation front (head angles facing the user, 0.1 degree)
+    int frontYaw = 0, frontPitch = 0;
+};
+
+struct NotifyStatus_t {
+    int64_t lastCheckUs = 0;  // esp_timer time of the last poll, 0 = never
+    int lastCount       = 0;
+    std::string lastError;
+};
+
+/**
+ * @brief AI conversation in the AVATAR app (tap the face, talk, StackChan answers with VOICEVOX)
+ *
+ * Speech recognition always goes through Gemini (free tier) when a Gemini key is set; with provider "gemini"
+ * listening and answering is a single request. OpenAI / Claude are paid APIs and only used when selected.
+ */
+struct AiChatConfig_t {
+    bool enabled         = true;
+    std::string provider = "gemini";  // gemini / openai / claude
+    std::string geminiKey;
+    std::string geminiModel = "gemini-3.5-flash-lite";
+    std::string openaiKey;
+    std::string openaiModel = "gpt-5-mini";
+    std::string claudeKey;
+    std::string claudeModel = "claude-haiku-5-5";
+    std::string systemPrompt =
+        "あなたはスタックチャンという小さなロボットです。ユーザーと日本語で、友達のように明るく話します。"
+        "返事は音声で読み上げられるので、1〜3文の短い話し言葉にして、絵文字・記号・箇条書き・マークダウンは使わないでください。";
+    int historyTurns = 6;  // past exchanges sent with each request
+    // Weather given to the AI (Open-Meteo, free, no key); picked on the settings page. Empty name = none.
+    std::string weatherName;
+    float weatherLat = 0.0f;
+    float weatherLon = 0.0f;
+};
+
+struct AiChatResult_t {
+    std::string heard;    // what the user said (transcribed or the text sent)
+    std::string reply;    // StackChan's answer without the emotion tag
+    std::string emotion;  // neutral / happy / angry / sad / doubt / sleepy
 };
 
 /**
@@ -252,6 +349,94 @@ public:
     uitk::Signal<CommonLogLevel, std::string_view> onWsLog;
 
     void startWebSocketAvatarService(std::function<void(std::string_view)> onStartLog);
+
+    /* -------------------------------- Local API ------------------------------- */
+    // Local HTTP API (port 80) for speech / motion / emotion control from the LAN
+    void startLocalApiService(std::function<void(std::string_view)> onStartLog);
+    std::string getLocalIp();
+    // Greeting voice + LED blink + nod so the user can tell StackChan is up and the API is ready
+    void playBootGreeting();
+    // (Re)create the idle animation modifiers from the saved settings. Call with the LVGL lock held.
+    void applyIdleModifiers();
+    // Synthesize text with cloud VOICEVOX and play it (mouth flapping / emotion / bubble when the avatar is up).
+    // Empty bubble shows none. Blocks until playback ends. Returns false with error set when synthesis fails
+    // (nothing is played).
+    bool speakText(const std::string& text, const std::string& emotion, const std::string& bubble, std::string& error);
+    // Play a 16-bit PCM WAV like speakText does (blocks until playback ends)
+    bool playWav(const uint8_t* data, size_t size, const std::string& emotion, const std::string& bubble,
+                 std::string& error);
+
+    /* --------------------------------- Actions -------------------------------- */
+    // Speak (VOICEVOX) with a head motion and LED blinks. Synthesizes before moving, so on failure nothing
+    // happens and error is set. Blocks until done.
+    bool runAction(const Action_t& action, std::string& error);
+    // Claude Code event templates ("stop", "notification", "sessionEnd") stored on the device
+    std::string getEventsJson();
+    void setEventsJson(ArduinoJson::JsonVariantConst json);
+    // Run an event's template with {session} filled in. Fails with "voicevox disabled" when VOICEVOX is off
+    // so the PC hook can fall back to its own voice.
+    bool runEvent(std::string_view name, std::string_view session, std::string& error);
+
+    /* ------------------------------ Notifications ----------------------------- */
+    // Polls the Apps Script relay (tools/gas/stackchan_notify.gs) and reads new Gmail / Calendar items aloud
+    NotifyConfig_t getNotifyConfig();
+    void setNotifyConfig(const NotifyConfig_t& config);
+    NotifyStatus_t getNotifyStatus();
+    // Starts the polling task once; it only polls while notifications are active (AVATAR app open)
+    void startNotifyService();
+    void setNotifyActive(bool active);
+    // Poll right now regardless of the interval / quiet hours; speaks what it finds. Blocks.
+    bool checkNotificationsNow(int& count, std::string& error);
+    // A web meeting is running on the PC (tools: stackchan-meeting.ps1 sees the microphone in use). Polls are
+    // put off and Claude Code events only blink and show their bubble until it ends. The PC renews it while
+    // the meeting lasts, so it times out by itself when the PC goes away; 0 ends it now.
+    void setMeetingFor(int seconds);
+    int meetingSecondsLeft();
+
+    /* ------------------------------ Face tracking ----------------------------- */
+    // Turn the head toward a face seen by the camera (ESP-DL, models in the assets partition) while held.
+    // The head is left alone when no face is seen. Calls nest; every begin needs an end.
+    void beginFaceTracking();
+    void endFaceTracking();
+    // Track for a while without an end call (settings page test)
+    void trackFaceFor(uint32_t ms);
+    FaceTrackStatus_t getFaceTrackStatus();
+    // The camera frame exactly as the face detector sees it (24-bit BMP)
+    bool getFaceCameraBmp(PsramBytes& bmp, std::string& error);
+    // The conversation front (Motion::setFront) is where a face was last seen; it is saved to flash.
+    // Load it with the LVGL lock held (AVATAR app start). Reset forgets it (head centres on 0 again).
+    void loadFaceFront();
+    void resetFaceFront();
+    // Look for the user every intervalMinutes (0 = never) while idle, and whether finding them shows the
+    // eye-contact badge. Only runs between setFaceIdleActive(true) and (false) (AVATAR app open).
+    void setFaceIdleSearch(int intervalMinutes, bool eyeContactMark);
+    void setFaceIdleActive(bool active);
+    // Something is playing or recording right now (speakText, playWav, ...)
+    bool isAudioBusy();
+    /* --------------------------------- AI chat -------------------------------- */
+    AiChatConfig_t getAiChatConfig();
+    void setAiChatConfig(const AiChatConfig_t& config);
+    // Starts the conversation task once (AVATAR app)
+    void startAiChatService();
+    // Listen on the mic and answer, in the background. Returns false when a conversation is already running.
+    bool requestAiChatListen();
+    bool isAiChatBusy();
+    // WAV of the last mic recording (empty before the first one)
+    bool getAiChatLastRecording(PsramBytes& wav);
+    // Answer a typed message (speaks the reply like a spoken one). Blocks. "busy" when a conversation is running.
+    bool aiChatText(const std::string& text, AiChatResult_t& result, std::string& error);
+    void clearAiChatHistory();
+    // Held while playing or recording so the speaker and the mic are never used at the same time
+    std::mutex& audioMutex();
+
+    /* -------------------------------- VOICEVOX -------------------------------- */
+    // Cloud VOICEVOX (WEB版VOICEVOX API by su-shiki), configured from the web settings page or SETUP
+    VoicevoxConfig_t getVoicevoxConfig();
+    void setVoicevoxConfig(const VoicevoxConfig_t& config);
+    // Returns a 16-bit PCM WAV in wav, or false with error set (Wi-Fi down, invalidApiKey, notEnoughPoints, ...)
+    bool voicevoxSynthesize(std::string_view text, PsramBytes& wav, std::string& error);
+    // GET a JSON endpoint of the API with the saved key ("speakers" or "points")
+    bool voicevoxFetchJson(std::string_view endpoint, std::string& out, std::string& error);
 
     /* ----------------------------------- IMU ---------------------------------- */
     uitk::Signal<ImuMotionEvent> onImuMotionEvent;

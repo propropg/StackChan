@@ -17,6 +17,10 @@ void AppLauncher::onLauncherCreate()
 {
     mclog::tagInfo(getAppInfo().name, "on create");
 
+    // Open AVATAR automatically on cold boot, so the local api is ready without manual taps.
+    // Warm reboot (e.g. exiting an app) returns to the launcher as usual.
+    _auto_open_avatar = GetHAL().getWarmRebootTarget() < 0;
+
     // 打开自己
     open();
 }
@@ -49,6 +53,9 @@ void AppLauncher::onLauncherRunning()
             _startup_checked = true;
             create_launcher_view();
         }
+    } else if (_auto_open_avatar) {
+        _auto_open_avatar = false;
+        open_app_by_name("AVATAR");
     } else {
         _view->update();
         screensaver_update();
@@ -100,6 +107,18 @@ void AppLauncher::create_launcher_view()
         mclog::tagInfo(getAppInfo().name, "handle open app, app id: {}", appID);
         openApp(appID);
     };
+}
+
+void AppLauncher::open_app_by_name(const std::string& name)
+{
+    for (const auto& props : getAppProps()) {
+        if (props.info.name == name) {
+            mclog::tagInfo(getAppInfo().name, "auto open app: {}", name);
+            openApp(props.appID);
+            return;
+        }
+    }
+    mclog::tagWarn(getAppInfo().name, "app not found: {}", name);
 }
 
 void AppLauncher::screensaver_update()

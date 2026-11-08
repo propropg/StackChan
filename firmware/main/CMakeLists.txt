@@ -300,13 +300,14 @@ if(CONFIG_IDF_TARGET_ESP32S3)
 endif()
 
 idf_component_register(SRCS ${SOURCES}
-                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
+                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS} assets/voice/boot_jingle.wav assets/voice/boot_greeting.wav assets/web/settings.html
                     INCLUDE_DIRS ${INCLUDE_DIRS}
                     WHOLE_ARCHIVE
                     PRIV_REQUIRES
                         esp_pm
                         esp_psram
                         esp_netif
+                        esp_http_server
                         esp_http_client
                         mbedtls
                         espressif__cjson
@@ -323,6 +324,7 @@ idf_component_register(SRCS ${SOURCES}
                         esp_app_format
                         app_update
                         spi_flash
+                        espcoredump
                         console
                         efuse
                         bt
@@ -438,8 +440,11 @@ function(build_default_assets_bin)
     endif()
     
     # Add default assets extra files if defined
+    set(EXTRA_FILE_DEPENDS)
     if(DEFAULT_ASSETS_EXTRA_FILES)
         list(APPEND BUILD_ARGS "--extra_files" "${DEFAULT_ASSETS_EXTRA_FILES}")
+        # Rebuild assets.bin when a file there is added or changed
+        file(GLOB EXTRA_FILE_DEPENDS CONFIGURE_DEPENDS "${DEFAULT_ASSETS_EXTRA_FILES}/*")
     endif()
     
     list(APPEND BUILD_ARGS "--esp_sr_model_path" "${ESP_SR_MODEL_PATH}")
@@ -457,6 +462,7 @@ function(build_default_assets_bin)
         DEPENDS
             ${SDKCONFIG}
             ${XIAOZHI_MAIN_DIR}/../scripts/build_default_assets.py
+            ${EXTRA_FILE_DEPENDS}
         COMMENT "Building default assets.bin based on configuration"
         VERBATIM
     )

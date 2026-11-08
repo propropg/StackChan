@@ -68,6 +68,7 @@ dependencies:
     - if: target in [esp32s3]
   espressif/adc_battery_estimation: ^0.2.0
   espressif/esp_new_jpeg: ^0.6.1
+  espressif/mdns: ^1.8.2
 
   # SenseCAP Watcher Board
   wvirgil123/sscma_client:
@@ -124,6 +125,13 @@ dependencies:
     version: ^0.3.1
     rules:
     - if: target in [esp32s3, esp32p4]
+
+  # Face detection for looking at the user while announcing notifications. The MSR+MNP models
+  # (from espressif/human_face_detect 0.5.0) live in the assets partition: main/assets/assets_bin/face_*.espdl
+  espressif/esp-dl:
+    version: ~3.3.0
+    rules:
+    - if: target in [esp32s3]
 
   ## Required IDF version
   idf:

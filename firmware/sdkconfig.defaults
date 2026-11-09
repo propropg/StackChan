@@ -105,3 +105,7 @@ CONFIG_PIX_CVT_YUV_TO_HSV_SUPPORT=n
 CONFIG_PIX_CVT_YUV_TO_YUV_SUPPORT=n
 # ESP-NOW security responder still uses protocomm security version 1.
 CONFIG_ESP_PROTOCOMM_SUPPORT_SECURITY_VERSION_1=y
+# ESP-IDF 6.x dropped "GlobalSign Root CA" from its bundle, but Google (Apps Script, Gemini) still sends a
+# chain that ends in a GTS Root R4 cross-signed by it, so TLS to Google fails without this.
+CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE_PATH="certs/globalsign_root_ca.pem"
